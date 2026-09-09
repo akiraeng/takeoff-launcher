@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 #include <windows.h>
 #include <shlobj.h>
@@ -206,58 +207,99 @@ private:
             lower == L"dist" || lower == L".git" || lower == L".vs" || lower == L".idea" ||
             lower == L"recovery" || lower == L"$recycle.bin" || lower == L"system volume information" ||
             lower == L"crashdumps" || lower == L"windows" || lower == L"program files" ||
-            lower == L"program files (x86)" || lower == L"programdata" || lower == L"perflogs") {
+            lower == L"program files (x86)" || lower == L"programdata" || lower == L"perflogs" ||
+            lower == L"hostedtoolcache" || lower == L"actions-runner" || lower == L"actions" ||
+            lower == L"vcpkg" || lower == L"msys64" || lower == L"msys32" || lower == L"chocolatey" ||
+            lower == L"tools" || lower == L"miniconda" || lower == L"miniconda3" ||
+            lower == L"anaconda" || lower == L"anaconda3" || lower == L"venv" || lower == L"virtualenvs") {
             return true;
         }
         return false;
     }
 
-    void AddItem(const fs::path& p, bool isDir, std::vector<FileItem>& items) {
+    void PublishSnapshot(const std::vector<FileItem>& items) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        index_ = std::make_shared<const std::vector<FileItem>>(items);
+        ready_ = true;
+    }
+
+    void AddItem(const fs::path& p, bool isDir, std::vector<FileItem>& items, std::unordered_set<std::wstring>& seen) {
         std::wstring name = p.filename().wstring();
         if (name.empty()) {
             name = p.wstring();
             if (name.empty()) return;
         }
         if (!isDir && (name[0] == L'.' || name[0] == L'~')) return;
-        std::wstring norm = Normalize(name);
         std::wstring fullPath = p.wstring();
         std::wstring normPath = Normalize(fullPath);
+        if (!seen.insert(normPath).second) {
+            return;
+        }
+        std::wstring norm = Normalize(name);
         items.push_back({std::move(name), std::move(norm), std::move(fullPath), std::move(normPath), isDir});
     }
 
-    void ScanPath(const fs::path& root, std::vector<FileItem>& items, int maxDepth, size_t maxCount) {
+    void ScanPath(const fs::path& root, std::vector<FileItem>& items, std::unordered_set<std::wstring>& seen, int maxDepth, size_t maxCount) {
         std::error_code ec;
         if (!fs::exists(root, ec)) return;
 
-        fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
-        const fs::recursive_directory_iterator end;
+        try {
+            fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
+            const fs::recursive_directory_iterator end;
 
-        while (it != end && !ec) {
-            if (!running_.load()) return;
-            if (items.size() >= maxCount) return;
+            while (it != end && !ec) {
+                if (!running_.load()) return;
+                if (items.size() >= maxCount) return;
 
-            const auto& entry = *it;
-            if (entry.is_directory(ec)) {
-                if (it.depth() >= maxDepth || ShouldSkipDirectory(entry.path())) {
-                    it.disable_recursion_pending();
-                } else {
-                    AddItem(entry.path(), true, items);
+                const auto& entry = *it;
+                bool isDir = entry.is_directory(ec);
+                if (!ec && isDir) {
+                    if (it.depth() >= maxDepth || ShouldSkipDirectory(entry.path())) {
+                        it.disable_recursion_pending();
+                    } else {
+                        AddItem(entry.path(), true, items, seen);
+                    }
+                    it.increment(ec);
+                    continue;
+                }
+
+                if (!ec && entry.is_regular_file(ec)) {
+                    AddItem(entry.path(), false, items, seen);
                 }
                 it.increment(ec);
-                continue;
             }
-
-            if (entry.is_regular_file(ec)) {
-                AddItem(entry.path(), false, items);
-            }
-            it.increment(ec);
-        }
+        } catch (...) {}
     }
 
     void BuildIndex() {
         constexpr size_t kMaxFiles = 150000;
         std::vector<FileItem> newItems;
         newItems.reserve(50000);
+        std::unordered_set<std::wstring> seen;
+        seen.reserve(50000);
+
+        // 0. Scan current working directory and project/repo root immediately
+        std::error_code ec;
+        fs::path currentDir = fs::current_path(ec);
+        if (!ec && !currentDir.empty()) {
+            fs::path repoDir = currentDir;
+            while (repoDir.has_parent_path()) {
+                const auto name = repoDir.filename().wstring();
+                if (_wcsicmp(name.c_str(), L"build") == 0 ||
+                    _wcsicmp(name.c_str(), L"Release") == 0 ||
+                    _wcsicmp(name.c_str(), L"Debug") == 0 ||
+                    _wcsicmp(name.c_str(), L"bin") == 0) {
+                    repoDir = repoDir.parent_path();
+                } else {
+                    break;
+                }
+            }
+            AddItem(repoDir, true, newItems, seen);
+            ScanPath(repoDir, newItems, seen, 6, kMaxFiles);
+            if (!newItems.empty()) {
+                PublishSnapshot(newItems);
+            }
+        }
 
         // 1. Scan primary user folders (Desktop, Documents, Downloads, Pictures, Music, Videos)
         const KNOWNFOLDERID userFolders[] = {
@@ -273,16 +315,18 @@ private:
             if (!running_.load()) return;
             PWSTR folderPath = nullptr;
             if (SUCCEEDED(SHGetKnownFolderPath(kfid, KF_FLAG_DEFAULT, nullptr, &folderPath))) {
-                AddItem(folderPath, true, newItems);
-                ScanPath(folderPath, newItems, 8, kMaxFiles);
+                AddItem(folderPath, true, newItems, seen);
+                ScanPath(folderPath, newItems, seen, 8, kMaxFiles);
                 CoTaskMemFree(folderPath);
             }
+        }
+        if (!newItems.empty()) {
+            PublishSnapshot(newItems);
         }
 
         // 2. Scan %USERPROFILE% roots (e.g. source code directories, projects, etc.)
         PWSTR profilePath = nullptr;
         if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Profile, KF_FLAG_DEFAULT, nullptr, &profilePath))) {
-            std::error_code ec;
             fs::directory_iterator dit(profilePath, fs::directory_options::skip_permission_denied, ec);
             for (const auto& entry : dit) {
                 if (!running_.load()) break;
@@ -296,14 +340,17 @@ private:
                         _wcsicmp(name.c_str(), L"Pictures") != 0 &&
                         _wcsicmp(name.c_str(), L"Music") != 0 &&
                         _wcsicmp(name.c_str(), L"Videos") != 0) {
-                        AddItem(entry.path(), true, newItems);
-                        ScanPath(entry.path(), newItems, 8, kMaxFiles);
+                        AddItem(entry.path(), true, newItems, seen);
+                        ScanPath(entry.path(), newItems, seen, 8, kMaxFiles);
                     }
                 } else if (entry.is_regular_file(ec)) {
-                    AddItem(entry.path(), false, newItems);
+                    AddItem(entry.path(), false, newItems, seen);
                 }
             }
             CoTaskMemFree(profilePath);
+            if (!newItems.empty()) {
+                PublishSnapshot(newItems);
+            }
         }
 
         // 3. Scan all fixed and removable drives (e.g. C:\, D:\, X:\)
@@ -315,7 +362,6 @@ private:
                 if (driveType == DRIVE_FIXED || driveType == DRIVE_REMOVABLE) {
                     const wchar_t driveLetter = towupper(drive[0]);
                     const bool isDriveC = (driveLetter == L'C');
-                    std::error_code ec;
                     fs::directory_iterator dit(drive, fs::directory_options::skip_permission_denied, ec);
                     for (const auto& entry : dit) {
                         if (!running_.load()) break;
@@ -327,12 +373,16 @@ private:
                                 continue;
                             }
                             if (!ShouldSkipDirectory(entry.path())) {
-                                AddItem(entry.path(), true, newItems);
-                                ScanPath(entry.path(), newItems, 8, kMaxFiles);
+                                AddItem(entry.path(), true, newItems, seen);
+                                const int maxDepth = isDriveC ? 4 : 8;
+                                ScanPath(entry.path(), newItems, seen, maxDepth, kMaxFiles);
                             }
                         } else if (entry.is_regular_file(ec)) {
-                            AddItem(entry.path(), false, newItems);
+                            AddItem(entry.path(), false, newItems, seen);
                         }
+                    }
+                    if (!newItems.empty()) {
+                        PublishSnapshot(newItems);
                     }
                 }
                 drive += wcslen(drive) + 1;

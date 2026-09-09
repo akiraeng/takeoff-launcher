@@ -386,20 +386,39 @@ int main() {
     std::cout << "[FileIndex] Live index populated " << indexedCount << " files/folders (ready=" << FileIndex::Instance().IsReady() << ").\n";
     Check(indexedCount > 0, "FileIndex populated files from disk");
 
-    // Verify broad file & folder search finds takeoff-launcher and its files
-    auto takeoffLauncherResults = FileIndex::Instance().Search(L"takeoff-launcher", 10);
-    Check(!takeoffLauncherResults.empty(), "takeoff-launcher query returns results");
-    Check(takeoffLauncherResults[0].isDirectory, "takeoff-launcher #1 result is a directory");
-    Check(takeoffLauncherResults[0].name == L"takeoff-launcher", "takeoff-launcher #1 result is takeoff-launcher folder");
+    // Determine the active workspace directory (project root)
+    std::error_code ec;
+    fs::path currentPath = fs::current_path(ec);
+    fs::path repoPath = currentPath;
+    while (repoPath.has_parent_path()) {
+        const auto name = repoPath.filename().wstring();
+        if (_wcsicmp(name.c_str(), L"build") == 0 ||
+            _wcsicmp(name.c_str(), L"Release") == 0 ||
+            _wcsicmp(name.c_str(), L"Debug") == 0 ||
+            _wcsicmp(name.c_str(), L"bin") == 0) {
+            repoPath = repoPath.parent_path();
+        } else {
+            break;
+        }
+    }
+    const std::wstring repoPathStr = repoPath.wstring();
+    const std::wstring repoFolderName = repoPath.filename().wstring();
 
-    auto xTakeoffResults = FileIndex::Instance().Search(L"X:/takeoff-launcher", 10);
-    Check(!xTakeoffResults.empty(), "X:/takeoff-launcher path query returns results");
+    // Verify broad file & folder search finds repo folder and its files
+    auto takeoffLauncherResults = FileIndex::Instance().Search(repoFolderName, 10);
+    Check(!takeoffLauncherResults.empty(), "repo folder query returns results");
+    Check(takeoffLauncherResults[0].isDirectory, "repo folder #1 result is a directory");
+    Check(takeoffLauncherResults[0].name == repoFolderName, "repo folder #1 result matches folder name");
+
+    auto pathResults = FileIndex::Instance().Search(repoPathStr, 10);
+    Check(!pathResults.empty(), "repo path query returns results");
 
     auto takeoffMainResults = FileIndex::Instance().Search(L"takeoff main", 10);
     Check(!takeoffMainResults.empty(), "takeoff main multi-token query returns results");
     Check(takeoffMainResults[0].name == L"main.cpp", "takeoff main finds main.cpp");
 
-    for (const wchar_t* q : {L"takeoff", L"takeoff-launcher", L"X:/takeoff-launcher", L"takeoff main", L"launcher", L"Takeoff.exe", L"main.cpp"}) {
+    std::vector<std::wstring> testQueries = {L"takeoff", repoFolderName, repoPathStr, L"takeoff main", L"launcher", L"main.cpp"};
+    for (const auto& q : testQueries) {
         auto results = FileIndex::Instance().Search(q, 5);
         std::wcout << L"Query [" << q << L"] -> " << results.size() << L" results:\n";
         for (const auto& r : results) {
