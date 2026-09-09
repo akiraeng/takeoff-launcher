@@ -25,6 +25,7 @@ struct FileItem {
     std::wstring name;
     std::wstring normName;
     std::wstring path;
+    std::wstring normPath;
     bool isDirectory = false;
 };
 
@@ -79,7 +80,7 @@ public:
         return index_ ? index_->size() : 0;
     }
 
-    // Ultra-fast in-memory search: evaluates in sub-millisecond time
+    // Ultra-fast in-memory search across filenames and directory paths
     std::vector<FileSearchResult> Search(std::wstring_view query, size_t maxResults = 30) const {
         if (query.empty()) return {};
 
@@ -93,22 +94,73 @@ public:
         const std::wstring normQuery = Normalize(query);
         if (normQuery.empty()) return {};
 
+        // Parse query tokens
+        std::vector<std::wstring_view> tokens;
+        size_t tStart = 0;
+        while (tStart < normQuery.size()) {
+            size_t tEnd = normQuery.find(L' ', tStart);
+            if (tEnd == std::wstring::npos) tEnd = normQuery.size();
+            if (tEnd > tStart) {
+                tokens.push_back(std::wstring_view(normQuery.data() + tStart, tEnd - tStart));
+            }
+            tStart = tEnd + 1;
+        }
+
         struct Candidate {
             int score;
             const FileItem* item;
         };
         std::vector<Candidate> candidates;
+        candidates.reserve(128);
 
         const wchar_t firstChar = normQuery[0];
-        const wchar_t lastChar = normQuery.back();
         const size_t qLen = normQuery.size();
+        const bool isSingleToken = (tokens.size() <= 1);
+        const bool hasPathSep = (query.find(L'/') != std::wstring_view::npos ||
+                                 query.find(L'\\') != std::wstring_view::npos ||
+                                 query.find(L':') != std::wstring_view::npos);
+        const bool allowPathMatch = hasPathSep || (tokens.size() > 1) || (normQuery.size() >= 3);
 
         for (const auto& item : *index) {
-            if (item.normName.size() < qLen) continue;
-            if (item.normName.find(firstChar) == std::wstring::npos) continue;
-            if (qLen > 1 && item.normName.find(lastChar) == std::wstring::npos) continue;
+            int s = -1;
 
-            int s = ScoreFile(item.normName, normQuery, item.isDirectory);
+            // 1. Primary match: check if query matches the file/folder name directly
+            if (item.normName.size() >= (isSingleToken ? qLen : tokens.back().size())) {
+                if (item.normName.find(firstChar) != std::wstring::npos) {
+                    s = ScoreFile(item.normName, normQuery, item.isDirectory);
+                }
+            }
+
+            // 2. Secondary match: path / parent directory match
+            if (s <= 0 && allowPathMatch) {
+                if (isSingleToken) {
+                    // Contiguous substring in path (e.g. folder name in path)
+                    size_t pos = item.normPath.find(normQuery);
+                    if (pos != std::wstring::npos) {
+                        const size_t penalty = (std::min)(item.normPath.size() / 4, size_t{300});
+                        int pathScore = 2600 - static_cast<int>(penalty);
+                        if (item.isDirectory) pathScore += 40;
+                        s = (std::max)(1000, pathScore);
+                    }
+                } else {
+                    // Multi-token match: all tokens must appear in normPath
+                    bool allFound = true;
+                    for (const auto& token : tokens) {
+                        if (item.normPath.find(token) == std::wstring::npos) {
+                            allFound = false;
+                            break;
+                        }
+                    }
+                    if (allFound) {
+                        const bool lastMatchesName = (item.normName.find(tokens.back()) != std::wstring::npos);
+                        const size_t penalty = (std::min)(item.normPath.size() / 4, size_t{300});
+                        int tokenScore = 2400 + (lastMatchesName ? 600 : 0) - static_cast<int>(penalty);
+                        if (item.isDirectory) tokenScore += 40;
+                        s = (std::max)(1000, tokenScore);
+                    }
+                }
+            }
+
             if (s > 0) {
                 candidates.push_back({s, &item});
             }
@@ -154,10 +206,23 @@ private:
             lower == L"dist" || lower == L".git" || lower == L".vs" || lower == L".idea" ||
             lower == L"recovery" || lower == L"$recycle.bin" || lower == L"system volume information" ||
             lower == L"crashdumps" || lower == L"windows" || lower == L"program files" ||
-            lower == L"program files (x86)" || lower == L"programdata") {
+            lower == L"program files (x86)" || lower == L"programdata" || lower == L"perflogs") {
             return true;
         }
         return false;
+    }
+
+    void AddItem(const fs::path& p, bool isDir, std::vector<FileItem>& items) {
+        std::wstring name = p.filename().wstring();
+        if (name.empty()) {
+            name = p.wstring();
+            if (name.empty()) return;
+        }
+        if (!isDir && (name[0] == L'.' || name[0] == L'~')) return;
+        std::wstring norm = Normalize(name);
+        std::wstring fullPath = p.wstring();
+        std::wstring normPath = Normalize(fullPath);
+        items.push_back({std::move(name), std::move(norm), std::move(fullPath), std::move(normPath), isDir});
     }
 
     void ScanPath(const fs::path& root, std::vector<FileItem>& items, int maxDepth, size_t maxCount) {
@@ -176,31 +241,23 @@ private:
                 if (it.depth() >= maxDepth || ShouldSkipDirectory(entry.path())) {
                     it.disable_recursion_pending();
                 } else {
-                    std::wstring dirName = entry.path().filename().wstring();
-                    if (!dirName.empty()) {
-                        std::wstring norm = Normalize(dirName);
-                        items.push_back({std::move(dirName), std::move(norm), entry.path().wstring(), true});
-                    }
+                    AddItem(entry.path(), true, items);
                 }
                 it.increment(ec);
                 continue;
             }
 
             if (entry.is_regular_file(ec)) {
-                std::wstring fileName = entry.path().filename().wstring();
-                if (!fileName.empty() && fileName[0] != L'.' && fileName[0] != L'~') {
-                    std::wstring norm = Normalize(fileName);
-                    items.push_back({std::move(fileName), std::move(norm), entry.path().wstring(), false});
-                }
+                AddItem(entry.path(), false, items);
             }
             it.increment(ec);
         }
     }
 
     void BuildIndex() {
-        constexpr size_t kMaxFiles = 80000;
+        constexpr size_t kMaxFiles = 150000;
         std::vector<FileItem> newItems;
-        newItems.reserve(30000);
+        newItems.reserve(50000);
 
         // 1. Scan primary user folders (Desktop, Documents, Downloads, Pictures, Music, Videos)
         const KNOWNFOLDERID userFolders[] = {
@@ -216,7 +273,8 @@ private:
             if (!running_.load()) return;
             PWSTR folderPath = nullptr;
             if (SUCCEEDED(SHGetKnownFolderPath(kfid, KF_FLAG_DEFAULT, nullptr, &folderPath))) {
-                ScanPath(folderPath, newItems, 6, kMaxFiles);
+                AddItem(folderPath, true, newItems);
+                ScanPath(folderPath, newItems, 8, kMaxFiles);
                 CoTaskMemFree(folderPath);
             }
         }
@@ -238,29 +296,42 @@ private:
                         _wcsicmp(name.c_str(), L"Pictures") != 0 &&
                         _wcsicmp(name.c_str(), L"Music") != 0 &&
                         _wcsicmp(name.c_str(), L"Videos") != 0) {
-                        ScanPath(entry.path(), newItems, 4, kMaxFiles);
+                        AddItem(entry.path(), true, newItems);
+                        ScanPath(entry.path(), newItems, 8, kMaxFiles);
                     }
+                } else if (entry.is_regular_file(ec)) {
+                    AddItem(entry.path(), false, newItems);
                 }
             }
             CoTaskMemFree(profilePath);
         }
 
-        // 3. Scan secondary fixed drives (e.g. X:\, D:\)
+        // 3. Scan all fixed and removable drives (e.g. C:\, D:\, X:\)
         wchar_t driveBuffer[512]{};
         if (GetLogicalDriveStringsW(static_cast<DWORD>(std::size(driveBuffer)), driveBuffer)) {
             const wchar_t* drive = driveBuffer;
             while (*drive && running_.load() && newItems.size() < kMaxFiles) {
-                if (GetDriveTypeW(drive) == DRIVE_FIXED) {
+                const UINT driveType = GetDriveTypeW(drive);
+                if (driveType == DRIVE_FIXED || driveType == DRIVE_REMOVABLE) {
                     const wchar_t driveLetter = towupper(drive[0]);
-                    if (driveLetter != L'C') {
-                        std::error_code ec;
-                        fs::directory_iterator dit(drive, fs::directory_options::skip_permission_denied, ec);
-                        for (const auto& entry : dit) {
-                            if (!running_.load()) break;
-                            if (newItems.size() >= kMaxFiles) break;
-                            if (entry.is_directory(ec) && !ShouldSkipDirectory(entry.path())) {
-                                ScanPath(entry.path(), newItems, 4, kMaxFiles);
+                    const bool isDriveC = (driveLetter == L'C');
+                    std::error_code ec;
+                    fs::directory_iterator dit(drive, fs::directory_options::skip_permission_denied, ec);
+                    for (const auto& entry : dit) {
+                        if (!running_.load()) break;
+                        if (newItems.size() >= kMaxFiles) break;
+                        if (entry.is_directory(ec)) {
+                            std::wstring dirName = entry.path().filename().wstring();
+                            if (isDriveC && _wcsicmp(dirName.c_str(), L"Users") == 0) {
+                                // Skip Users root on C: as user profile was already scanned in step 2
+                                continue;
                             }
+                            if (!ShouldSkipDirectory(entry.path())) {
+                                AddItem(entry.path(), true, newItems);
+                                ScanPath(entry.path(), newItems, 8, kMaxFiles);
+                            }
+                        } else if (entry.is_regular_file(ec)) {
+                            AddItem(entry.path(), false, newItems);
                         }
                     }
                 }

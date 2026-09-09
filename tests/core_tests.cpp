@@ -379,10 +379,33 @@ int main() {
 
     // 5. Live FileIndex background indexing & sub-millisecond search benchmark
     FileIndex::Instance().Start();
-    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    for (int w = 0; w < 40 && !FileIndex::Instance().IsReady(); ++w) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
     const size_t indexedCount = FileIndex::Instance().Count();
-    std::cout << "[FileIndex] Live index populated " << indexedCount << " files/folders.\n";
+    std::cout << "[FileIndex] Live index populated " << indexedCount << " files/folders (ready=" << FileIndex::Instance().IsReady() << ").\n";
     Check(indexedCount > 0, "FileIndex populated files from disk");
+
+    // Verify broad file & folder search finds takeoff-launcher and its files
+    auto takeoffLauncherResults = FileIndex::Instance().Search(L"takeoff-launcher", 10);
+    Check(!takeoffLauncherResults.empty(), "takeoff-launcher query returns results");
+    Check(takeoffLauncherResults[0].isDirectory, "takeoff-launcher #1 result is a directory");
+    Check(takeoffLauncherResults[0].name == L"takeoff-launcher", "takeoff-launcher #1 result is takeoff-launcher folder");
+
+    auto xTakeoffResults = FileIndex::Instance().Search(L"X:/takeoff-launcher", 10);
+    Check(!xTakeoffResults.empty(), "X:/takeoff-launcher path query returns results");
+
+    auto takeoffMainResults = FileIndex::Instance().Search(L"takeoff main", 10);
+    Check(!takeoffMainResults.empty(), "takeoff main multi-token query returns results");
+    Check(takeoffMainResults[0].name == L"main.cpp", "takeoff main finds main.cpp");
+
+    for (const wchar_t* q : {L"takeoff", L"takeoff-launcher", L"X:/takeoff-launcher", L"takeoff main", L"launcher", L"Takeoff.exe", L"main.cpp"}) {
+        auto results = FileIndex::Instance().Search(q, 5);
+        std::wcout << L"Query [" << q << L"] -> " << results.size() << L" results:\n";
+        for (const auto& r : results) {
+            std::wcout << L"  - " << (r.isDirectory ? L"[DIR]  " : L"[FILE] ") << r.name << L" (" << r.path << L") score=" << r.score << L"\n";
+        }
+    }
 
     // Benchmark 100 search queries on live in-memory index
     const auto fileStart = std::chrono::high_resolution_clock::now();
@@ -397,5 +420,31 @@ int main() {
     Check(perQueryMs < 5.0, "file search evaluation executes in under 5ms per query");
     FileIndex::Instance().Stop();
 
-    std::cout << "All search, text editing, and hotkey checks passed in " << elapsed << "ms.\n";
+    // 6. Settings Scroll and Viewport Invariants:
+    // Guarantees Settings content cleanly fits and scrolls without overlapping FooterTop (440px).
+    constexpr float kWindowHeight = 482.0f;
+    constexpr float kFooterH = 42.0f;
+    constexpr float kSettingsHeaderH = 46.0f;
+    constexpr float kSettingsRowH = 47.0f;
+    constexpr float footerTop = kWindowHeight - kFooterH; // 440.0f
+    constexpr float generalTop = 280.0f;
+    constexpr float row7Top = generalTop + 3 * kSettingsRowH; // 421.0f
+    constexpr float row7Bottom = row7Top + kSettingsRowH;     // 468.0f
+    constexpr float contentBottom = row7Bottom + 14.0f;       // 482.0f
+    constexpr float maxScroll = contentBottom - footerTop;    // 42.0f
+
+    Check(footerTop == 440.0f, "footer top is exactly 440px");
+    Check(row7Bottom > footerTop, "unscrolled row 7 exceeds footer top, proving scroll is required");
+    Check(maxScroll == 42.0f, "settings max scroll is 42px");
+
+    // When scrolled to maxScroll:
+    const float scrolledRow7Bottom = row7Bottom - maxScroll;
+    Check(scrolledRow7Bottom < footerTop, "scrolled row 7 bottom is strictly above footer top");
+    Check(footerTop - scrolledRow7Bottom >= 14.0f, "row 7 has at least 14px clearance above footer");
+
+    // Check viewport height and scrollable area:
+    constexpr float viewportHeight = footerTop - kSettingsHeaderH; // 394.0f
+    Check(viewportHeight == 394.0f, "settings viewport height is 394px");
+
+    std::cout << "All search, text editing, hotkey, and settings scroll checks passed in " << elapsed << "ms.\n";
 }

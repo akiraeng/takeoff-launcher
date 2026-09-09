@@ -324,9 +324,11 @@ private:
             return 0;
         case WM_LBUTTONUP:
             if (dragging_) { dragging_ = false; ReleaseCapture(); }
+            if (settingsDraggingScroll_) { settingsDraggingScroll_ = false; ReleaseCapture(); }
             return 0;
         case WM_CAPTURECHANGED:
             dragging_ = false;
+            settingsDraggingScroll_ = false;
             return 0;
         case WM_MOUSEMOVE:
             HandleMouseMove(ToDip(GET_X_LPARAM(lParam)), ToDip(GET_Y_LPARAM(lParam)));
@@ -342,6 +344,9 @@ private:
                 const int steps = wheelDelta_ / WHEEL_DELTA;
                 wheelDelta_ %= WHEEL_DELTA;
                 MoveSelection(-steps * 3, false);
+            } else if (page_ == Page::Settings) {
+                const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+                ScrollSettings(-static_cast<float>(delta) / static_cast<float>(WHEEL_DELTA) * 36.0f);
             }
             return 0;
         case WM_SETCURSOR:
@@ -932,11 +937,65 @@ private:
         }
     }
 
+    float SettingsContentBottom() const {
+        return 280.0f + 4 * kSettingsRowHeight + 14.0f;
+    }
+
+    float SettingsContentHeight() const {
+        return SettingsContentBottom() - kSettingsHeaderHeight;
+    }
+
+    float SettingsViewportHeight() const {
+        return FooterTop() - kSettingsHeaderHeight;
+    }
+
+    float SettingsMaxScroll() const {
+        return (std::max)(0.0f, SettingsContentBottom() - FooterTop());
+    }
+
+    float SettingsRowTop(int row) const {
+        if (row < 4) {
+            return 68.0f + row * kSettingsRowHeight;
+        } else {
+            return 280.0f + (row - 4) * kSettingsRowHeight;
+        }
+    }
+
+    void ScrollSettings(float delta) {
+        const float maxScroll = SettingsMaxScroll();
+        const float newScroll = std::clamp(settingsScroll_ + delta, 0.0f, maxScroll);
+        if (newScroll != settingsScroll_) {
+            settingsScroll_ = newScroll;
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
+    }
+
+    void EnsureSettingsVisible(int row) {
+        if (row == 8) {
+            settingsScroll_ = 0.0f;
+            return;
+        }
+        if (row < 0 || row > 7) return;
+        const float rTop = SettingsRowTop(row);
+        const float rBottom = rTop + kSettingsRowHeight;
+        const float maxScroll = SettingsMaxScroll();
+        const float visibleTop = (row == 0) ? 48.0f : (row == 4 ? 260.0f : rTop);
+        const float visibleBottom = (row == 7) ? (rBottom + 14.0f) : rBottom;
+
+        if (visibleTop - settingsScroll_ < kSettingsHeaderHeight + 2.0f) {
+            settingsScroll_ = (std::max)(0.0f, visibleTop - (kSettingsHeaderHeight + 2.0f));
+        } else if (visibleBottom - settingsScroll_ > FooterTop() - 2.0f) {
+            settingsScroll_ = (std::min)(maxScroll, visibleBottom - (FooterTop() - 2.0f));
+        }
+    }
+
     void OpenSettings() {
         page_ = Page::Settings;
         actionsOpen_ = false;
         dragging_ = false;
         settingsSelected_ = 0;
+        settingsScroll_ = 0.0f;
+        settingsDraggingScroll_ = false;
         settingsStatus_.clear();
         recordingRow_ = -1;
         if (GetCapture() == hwnd_) ReleaseCapture();
@@ -947,6 +1006,8 @@ private:
     void CloseSettings() {
         page_ = Page::Launcher;
         recordingRow_ = -1;
+        settingsScroll_ = 0.0f;
+        settingsDraggingScroll_ = false;
         ResetCaret();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
@@ -1316,13 +1377,25 @@ private:
             if (key == VK_ESCAPE || (alt && key == VK_LEFT)) {
                 CloseSettings();
             } else if (key == VK_UP || (key == VK_TAB && shift)) {
-                settingsSelected_ = (settingsSelected_ + 7) % 8;
                 settingsSelected_ = (settingsSelected_ + 8) % 9;
+                EnsureSettingsVisible(settingsSelected_);
                 InvalidateRect(hwnd_, nullptr, FALSE);
             } else if (key == VK_DOWN || key == VK_TAB) {
-                settingsSelected_ = (settingsSelected_ + 1) % 8;
                 settingsSelected_ = (settingsSelected_ + 1) % 9;
+                EnsureSettingsVisible(settingsSelected_);
                 InvalidateRect(hwnd_, nullptr, FALSE);
+            } else if (key == VK_HOME) {
+                settingsSelected_ = 0;
+                EnsureSettingsVisible(settingsSelected_);
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            } else if (key == VK_END) {
+                settingsSelected_ = 7;
+                EnsureSettingsVisible(settingsSelected_);
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            } else if (key == VK_PRIOR) {
+                ScrollSettings(-kSettingsRowHeight * 2);
+            } else if (key == VK_NEXT) {
+                ScrollSettings(kSettingsRowHeight * 2);
             } else if (key == VK_LEFT || key == VK_RIGHT ||
                        key == VK_RETURN || key == VK_SPACE) {
                 ChangeSetting(settingsSelected_);
@@ -1611,19 +1684,35 @@ private:
             }
             const float resetLeft = width_ - 136.0f, resetRight = width_ - 20.0f;
             if (y >= 10.0f && y <= 36.0f && x >= resetLeft && x <= resetRight) {
-                settingsSelected_ = 7;
                 settingsSelected_ = 8;
                 ResetToDefaults();
                 return;
             }
+            if (y < kSettingsHeaderHeight || y >= FooterTop()) {
+                return;
+            }
+            // Scrollbar track/thumb click & drag
+            if (x >= width_ - 14.0f) {
+                const float trackTop = kSettingsHeaderHeight + 4.0f;
+                const float trackBottom = FooterTop() - 4.0f;
+                if (y >= trackTop && y <= trackBottom) {
+                    const float progress = (y - trackTop) / (trackBottom - trackTop);
+                    settingsScroll_ = std::clamp(progress * SettingsMaxScroll(), 0.0f, SettingsMaxScroll());
+                    settingsDraggingScroll_ = true;
+                    SetCapture(hwnd_);
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                }
+                return;
+            }
+
+            const float contentY = y + settingsScroll_;
             constexpr float keyboardTop = 68.0f;
             constexpr float generalTop = 280.0f;
             int row = -1;
-            if (y >= keyboardTop && y < keyboardTop + 4 * kSettingsRowHeight) {
-                row = static_cast<int>((y - keyboardTop) / kSettingsRowHeight);
-            } else if (y >= generalTop && y < generalTop + 3 * kSettingsRowHeight) {
-            } else if (y >= generalTop && y < generalTop + 4 * kSettingsRowHeight) {
-                row = 4 + static_cast<int>((y - generalTop) / kSettingsRowHeight);
+            if (contentY >= keyboardTop && contentY < keyboardTop + 4 * kSettingsRowHeight) {
+                row = static_cast<int>((contentY - keyboardTop) / kSettingsRowHeight);
+            } else if (contentY >= generalTop && contentY < generalTop + 4 * kSettingsRowHeight) {
+                row = 4 + static_cast<int>((contentY - generalTop) / kSettingsRowHeight);
             }
             if (row >= 0) {
                 if (recordingRow_ >= 0 && row != recordingRow_) {
@@ -1711,18 +1800,30 @@ private:
             return;
         }
         if (page_ == Page::Settings) {
-            constexpr float keyboardTop = 68.0f;
-            constexpr float generalTop = 280.0f;
+            if (settingsDraggingScroll_) {
+                const float trackTop = kSettingsHeaderHeight + 4.0f;
+                const float trackBottom = FooterTop() - 4.0f;
+                const float progress = std::clamp((y - trackTop) / (trackBottom - trackTop), 0.0f, 1.0f);
+                const float newScroll = progress * SettingsMaxScroll();
+                if (newScroll != settingsScroll_) {
+                    settingsScroll_ = newScroll;
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                }
+                return;
+            }
             const float resetLeft = width_ - 136.0f, resetRight = width_ - 20.0f;
             int row = -1;
             if (y >= 10.0f && y <= 36.0f && x >= resetLeft && x <= resetRight) {
-                row = 7;
                 row = 8;
-            } else if (y >= keyboardTop && y < keyboardTop + 4 * kSettingsRowHeight) {
-                row = static_cast<int>((y - keyboardTop) / kSettingsRowHeight);
-            } else if (y >= generalTop && y < generalTop + 3 * kSettingsRowHeight) {
-            } else if (y >= generalTop && y < generalTop + 4 * kSettingsRowHeight) {
-                row = 4 + static_cast<int>((y - generalTop) / kSettingsRowHeight);
+            } else if (y >= kSettingsHeaderHeight && y < FooterTop() && x < width_ - 14.0f) {
+                const float contentY = y + settingsScroll_;
+                constexpr float keyboardTop = 68.0f;
+                constexpr float generalTop = 280.0f;
+                if (contentY >= keyboardTop && contentY < keyboardTop + 4 * kSettingsRowHeight) {
+                    row = static_cast<int>((contentY - keyboardTop) / kSettingsRowHeight);
+                } else if (contentY >= generalTop && contentY < generalTop + 4 * kSettingsRowHeight) {
+                    row = 4 + static_cast<int>((contentY - generalTop) / kSettingsRowHeight);
+                }
             }
             if (row >= 0 && row != settingsSelected_) {
                 settingsSelected_ = row;
@@ -2595,6 +2696,63 @@ private:
     }
 
     void DrawSettings() {
+        // Scrollable content area clipped cleanly between header and footer
+        target_->PushAxisAlignedClip(
+            D2D1::RectF(0, kSettingsHeaderHeight, width_, FooterTop()),
+            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+        const float offsetY = -settingsScroll_;
+
+        Text(L"KEYBOARD", D2D1::RectF(20, 48.0f + offsetY, width_ - 20, 68.0f + offsetY),
+            hintFormat_.Get(), Muted());
+        constexpr float keyboardTop = 68.0f;
+        DrawSettingsRow(0, keyboardTop + offsetY, L"Open Takeoff",
+            L"Global shortcut that opens or closes the launcher",
+            quicklaunch::FormatBinding(settings_.launcherHotkey));
+        DrawSettingsRow(1, keyboardTop + kSettingsRowHeight + offsetY, L"Actions menu",
+            L"Show actions for the selected application",
+            quicklaunch::FormatBinding(settings_.actionsHotkey));
+        DrawSettingsRow(2, keyboardTop + 2 * kSettingsRowHeight + offsetY, L"Open as administrator",
+            L"Launch the selected application with elevation",
+            quicklaunch::FormatAdminBinding(settings_.administratorHotkey));
+        DrawSettingsRow(3, keyboardTop + 3 * kSettingsRowHeight + offsetY, L"Quick launch",
+            L"Open one of the eight visible results directly",
+            quicklaunch::FormatQuickLaunchBinding(settings_.quickLaunchHotkey));
+
+        constexpr float generalTop = 280.0f;
+        Text(L"GENERAL", D2D1::RectF(20, generalTop - 20.0f + offsetY, width_ - 20, generalTop + offsetY),
+            hintFormat_.Get(), Muted());
+        DrawSettingsRow(4, generalTop + offsetY, L"Run at startup",
+            L"Start Takeoff when you sign in to Windows", {}, true, settings_.runAtStartup);
+        DrawSettingsRow(5, generalTop + kSettingsRowHeight + offsetY, L"Notification area icon",
+            L"Show Takeoff in the hidden icons area", {}, true, settings_.showTrayIcon);
+        DrawSettingsRow(6, generalTop + 2 * kSettingsRowHeight + offsetY, L"Check for updates",
+            L"Check for updates when Takeoff starts", {}, true, settings_.checkForUpdates);
+        DrawSettingsRow(7, generalTop + 3 * kSettingsRowHeight + offsetY, L"File search",
+            L"Search files and folders on your computer", {}, true, settings_.enableFileSearch);
+
+        target_->PopAxisAlignedClip();
+
+        // Subtle modern scrollbar thumb if content exceeds viewport
+        const float maxScroll = SettingsMaxScroll();
+        if (maxScroll > 0.0f) {
+            const float trackTop = kSettingsHeaderHeight + 4.0f;
+            const float trackBottom = FooterTop() - 4.0f;
+            const float trackHeight = trackBottom - trackTop;
+            const float viewportHeight = SettingsViewportHeight();
+            const float contentHeight = SettingsContentHeight();
+            const float thumbHeight = (std::max)(32.0f, trackHeight * (viewportHeight / contentHeight));
+            const float thumbTop = trackTop + (trackHeight - thumbHeight) * (settingsScroll_ / maxScroll);
+            const auto thumbRect = D2D1::RectF(width_ - 7.0f, thumbTop, width_ - 3.0f, thumbTop + thumbHeight);
+            Fill(thumbRect, highContrast_
+                ? SystemColor(COLOR_HIGHLIGHT)
+                : (settingsDraggingScroll_ ? D2D1::ColorF(1, 1, 1, 0.35f) : D2D1::ColorF(1, 1, 1, 0.20f)),
+                2.0f);
+        }
+
+        // Fixed header drawn above scrollable content
+        Fill(D2D1::RectF(1, 1, width_ - 1, kSettingsHeaderHeight), highContrast_ ? SystemColor(COLOR_WINDOW) :
+            acrylic_ ? D2D1::ColorF(0x171719, 0.98f) : D2D1::ColorF(0x252527));
         Line(25, 23, 36, 23, Muted(), 1.6f);
         Line(25, 23, 30, 18, Muted(), 1.6f);
         Line(25, 23, 30, 28, Muted(), 1.6f);
@@ -2618,35 +2776,10 @@ private:
         Line(1, kSettingsHeaderHeight, width_ - 1, kSettingsHeaderHeight,
             D2D1::ColorF(1, 1, 1, 0.09f));
 
-        Text(L"KEYBOARD", D2D1::RectF(20, 48, width_ - 20, 68),
-            hintFormat_.Get(), Muted());
-        constexpr float keyboardTop = 68.0f;
-        DrawSettingsRow(0, keyboardTop, L"Open Takeoff",
-            L"Global shortcut that opens or closes the launcher",
-            quicklaunch::FormatBinding(settings_.launcherHotkey));
-        DrawSettingsRow(1, keyboardTop + kSettingsRowHeight, L"Actions menu",
-            L"Show actions for the selected application",
-            quicklaunch::FormatBinding(settings_.actionsHotkey));
-        DrawSettingsRow(2, keyboardTop + 2 * kSettingsRowHeight, L"Open as administrator",
-            L"Launch the selected application with elevation",
-            quicklaunch::FormatAdminBinding(settings_.administratorHotkey));
-        DrawSettingsRow(3, keyboardTop + 3 * kSettingsRowHeight, L"Quick launch",
-            L"Open one of the eight visible results directly",
-            quicklaunch::FormatQuickLaunchBinding(settings_.quickLaunchHotkey));
-
-        constexpr float generalTop = 280.0f;
-        Text(L"GENERAL", D2D1::RectF(20, generalTop - 20.0f, width_ - 20, generalTop),
-            hintFormat_.Get(), Muted());
-        DrawSettingsRow(4, generalTop, L"Run at startup",
-            L"Start Takeoff when you sign in to Windows", {}, true, settings_.runAtStartup);
-        DrawSettingsRow(5, generalTop + kSettingsRowHeight, L"Notification area icon",
-            L"Show Takeoff in the hidden icons area", {}, true, settings_.showTrayIcon);
-        DrawSettingsRow(6, generalTop + 2 * kSettingsRowHeight, L"Check for updates",
-            L"Check for updates when Takeoff starts", {}, true, settings_.checkForUpdates);
-        DrawSettingsRow(7, generalTop + 3 * kSettingsRowHeight, L"File search",
-            L"Search files and folders on your computer", {}, true, settings_.enableFileSearch);
-
+        // Fixed footer drawn above scrollable content
         const float top = FooterTop();
+        Fill(D2D1::RectF(1, top, width_ - 1, height_ - 1), highContrast_ ? SystemColor(COLOR_WINDOW) :
+            acrylic_ ? D2D1::ColorF(0x171719, 0.98f) : D2D1::ColorF(0x252527));
         Fill(D2D1::RectF(1, top, width_ - 1, height_ - 1), D2D1::ColorF(0, 0, 0, 0.10f));
         Line(1, top, width_ - 1, top, D2D1::ColorF(1, 1, 1, 0.09f));
         const std::wstring footerMsg = !settingsStatus_.empty() ? settingsStatus_
@@ -2722,6 +2855,8 @@ private:
     int settingsSelected_ = 0;
     int recordingRow_ = -1;
     float textScroll_ = 0, caretX_ = kTextLeft, mouseX_ = 0, mouseY_ = 0;
+    float settingsScroll_ = 0.0f;
+    bool settingsDraggingScroll_ = false;
     bool acrylic_ = false, nativeCorners_ = false, highContrast_ = false;
     bool backdropApplied_ = false, allowBlur_ = false;
     bool indexReady_ = false, caretVisible_ = true, hotkeyRegistered_ = false;
