@@ -1406,11 +1406,19 @@ private:
             return DefWindowProcW(hwnd_, WM_KEYDOWN, key, lParam);
         }
         if (key == VK_ESCAPE) {
-            if (composing_) {
+            if (actionsOpen_) {
+                actionsOpen_ = false;
+                actionsPositioned_ = false;
+                ResetCaret();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            } else if (composing_) {
                 if (HIMC context = ImmGetContext(hwnd_)) {
                     ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
                     ImmReleaseContext(hwnd_, context);
                 }
+            } else if (!input_.text.empty()) {
+                input_.Clear();
+                OnQueryChanged();
             } else {
                 Hide();
             }
@@ -1901,7 +1909,7 @@ private:
             iconPending_.insert(lookupPath);
             {
                 std::lock_guard<std::mutex> lock(iconMutex_);
-                iconQueue_.push_back({lookupPath, size});
+                iconQueue_.push_back({lookupPath, size, dpi_});
             }
             iconCv_.notify_one();
         }
@@ -1942,7 +1950,7 @@ private:
             auto result = std::make_unique<IconResult>();
             result->path = std::move(request.path);
             result->size = request.size;
-            if (wic) result->source = LoadIconSource(wic.Get(), result->path, request.size);
+            if (wic) result->source = LoadIconSource(wic.Get(), result->path, request.size, request.dpi);
             if (PostMessageW(hwnd_, kIconReadyMessage, 0, reinterpret_cast<LPARAM>(result.get()))) {
                 result.release();
             } else {

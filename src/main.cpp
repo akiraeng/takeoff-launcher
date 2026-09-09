@@ -617,6 +617,7 @@ std::vector<AppEntry> BuildAppIndex() {
 struct IconRequest {
     std::wstring path;
     UINT size = 0;
+    UINT dpi = 96;
 };
 
 struct IconResult {
@@ -625,32 +626,93 @@ struct IconResult {
     ComPtr<IWICBitmapSource> source;
 };
 
-// Runs on the icon worker thread. Extracts the shell icon, then materializes
-// the downscaled pixels into a small standalone bitmap so the cache never pins
-// the original 256px decode (which would cost ~256KB per cached icon).
+// Detects whether a 256x256 image returned by the shell is actually a synthetic
+// thumbnail plate (with an outer border box) around a small 32px/48px icon.
+bool IsBoxedThumbnail(IWICBitmap* bitmap) {
+    if (!bitmap) return false;
+    UINT width = 0, height = 0;
+    if (FAILED(bitmap->GetSize(&width, &height)) || width != 256 || height != 256) {
+        return false;
+    }
+    ComPtr<IWICBitmapLock> lock;
+    WICRect rect{0, 0, 256, 256};
+    if (FAILED(bitmap->Lock(&rect, WICBitmapLockRead, &lock))) {
+        return false;
+    }
+    UINT bufferSize = 0;
+    WICInProcPointer data = nullptr;
+    if (FAILED(lock->GetDataPointer(&bufferSize, &data)) || bufferSize < 256 * 256 * 4) {
+        return false;
+    }
+
+    // Windows Shell synthesizes a 1px border around the 256x256 canvas when wrapping small icons.
+    size_t edgeNonZero = 0;
+    const BYTE* pixels = data;
+    for (int x = 0; x < 256; ++x) {
+        if (pixels[(0 * 256 + x) * 4 + 3] > 0) ++edgeNonZero;
+        if (pixels[(255 * 256 + x) * 4 + 3] > 0) ++edgeNonZero;
+    }
+    for (int y = 1; y < 255; ++y) {
+        if (pixels[(y * 256 + 0) * 4 + 3] > 0) ++edgeNonZero;
+        if (pixels[(y * 256 + 255) * 4 + 3] > 0) ++edgeNonZero;
+    }
+    if (edgeNonZero <= 100) return false;
+
+    // If it has a perimeter border, check if the interior is mostly empty (< 14,000 non-zero pixels).
+    size_t totalNonZero = 0;
+    for (int i = 0; i < 256 * 256; ++i) {
+        if (pixels[i * 4 + 3] > 0) {
+            ++totalNonZero;
+            if (totalNonZero >= 14000) return false;
+        }
+    }
+    return true;
+}
+
+// Runs on the icon worker thread. Extracts the highest quality shell icon,
+// downscales using WIC Fant box filter, and stamps display DPI for 1:1 pixel rendering.
 ComPtr<IWICBitmapSource> LoadIconSource(IWICImagingFactory* wic,
-    const std::wstring& path, UINT size) {
+    const std::wstring& path, UINT size, UINT dpi) {
     ComPtr<IWICBitmapSource> source;
     ComPtr<IShellItemImageFactory> imageFactory;
     if (SUCCEEDED(SHCreateItemFromParsingName(path.c_str(), nullptr,
             IID_PPV_ARGS(&imageFactory)))) {
         HBITMAP bitmap = nullptr;
-        // Request the jumbo 256px icon so we downscale a sharp source
-        // instead of upscaling the small 32px variant.
-        if (FAILED(imageFactory->GetImage({256, 256},
-                SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK, &bitmap))) {
-            imageFactory->GetImage({static_cast<LONG>(size), static_cast<LONG>(size)},
-                SIIGBF_BIGGERSIZEOK, &bitmap);
-        }
-        if (bitmap) {
+        // 1. Try 256x256 jumbo icon first. For apps with high-res icon assets,
+        // this supplies the sharpest master source for downscaling.
+        if (SUCCEEDED(imageFactory->GetImage({256, 256},
+                SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK, &bitmap)) && bitmap) {
             ComPtr<IWICBitmap> converted;
             if (SUCCEEDED(wic->CreateBitmapFromHBITMAP(bitmap, nullptr,
                     WICBitmapUsePremultipliedAlpha, &converted))) {
-                source = converted;
+                if (!IsBoxedThumbnail(converted.Get())) {
+                    source = converted;
+                }
             }
             DeleteObject(bitmap);
+            bitmap = nullptr;
+        }
+
+        // 2. If 256px failed or was a synthetic boxed thumbnail around a small icon,
+        // query native standard tiers (48px or 32px) directly without thumbnail framing.
+        if (!source) {
+            if (FAILED(imageFactory->GetImage({48, 48}, SIIGBF_ICONONLY, &bitmap)) || !bitmap) {
+                if (FAILED(imageFactory->GetImage({32, 32}, SIIGBF_ICONONLY, &bitmap)) || !bitmap) {
+                    imageFactory->GetImage({32, 32}, SIIGBF_RESIZETOFIT, &bitmap);
+                }
+            }
+            if (bitmap) {
+                ComPtr<IWICBitmap> converted;
+                if (SUCCEEDED(wic->CreateBitmapFromHBITMAP(bitmap, nullptr,
+                        WICBitmapUsePremultipliedAlpha, &converted))) {
+                    source = converted;
+                }
+                DeleteObject(bitmap);
+            }
         }
     }
+
+    // 3. Fallback to SHGetFileInfo if IShellItemImageFactory was unavailable.
     if (!source) {
         SHFILEINFOW info{};
         if (SHGetFileInfoW(path.c_str(), 0, &info, sizeof(info),
@@ -663,6 +725,21 @@ ComPtr<IWICBitmapSource> LoadIconSource(IWICImagingFactory* wic,
         }
     }
     if (!source) return nullptr;
+
+    // 4. Downscale cleanly to target pixel size with WIC's Fant filter (area-averaging box filter).
+    // Stamp display DPI so Direct2D renders 1:1 on the physical pixel grid without fractional resampling blur.
+    UINT width = 0, height = 0;
+    if (SUCCEEDED(source->GetSize(&width, &height)) && width == size && height == size) {
+        ComPtr<IWICBitmap> copy;
+        if (SUCCEEDED(wic->CreateBitmapFromSource(source.Get(), WICBitmapCacheOnLoad, &copy))) {
+            if (dpi > 0) {
+                copy->SetResolution(static_cast<double>(dpi), static_cast<double>(dpi));
+            }
+            return copy;
+        }
+        return source;
+    }
+
     ComPtr<IWICBitmapScaler> scaler;
     ComPtr<IWICBitmap> scaled;
     if (SUCCEEDED(wic->CreateBitmapScaler(&scaler)) &&
@@ -670,6 +747,9 @@ ComPtr<IWICBitmapSource> LoadIconSource(IWICImagingFactory* wic,
             WICBitmapInterpolationModeFant)) &&
         SUCCEEDED(wic->CreateBitmapFromSource(scaler.Get(), WICBitmapCacheOnLoad,
             &scaled))) {
+        if (dpi > 0) {
+            scaled->SetResolution(static_cast<double>(dpi), static_cast<double>(dpi));
+        }
         return scaled;
     }
     return source;
