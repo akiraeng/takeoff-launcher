@@ -5,6 +5,7 @@ function(add_launcher target)
 add_executable(${target} WIN32
     src/main.cpp
     src/launcher.h
+    src/file_index.h
     src/search.h
     src/settings.h
     src/updates.h

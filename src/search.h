@@ -11,7 +11,9 @@ namespace takeoff {
 
 enum class AppCategory : uint8_t {
     Application,
-    System
+    System,
+    File,
+    Folder
 };
 
 inline std::wstring Normalize(std::wstring_view value) {
@@ -187,6 +189,22 @@ inline int ScoreApp(
     return best;
 }
 
+inline int ScoreFile(
+    std::wstring_view normalizedName,
+    std::wstring_view query,
+    bool isDirectory = false
+) {
+    if (query.empty()) return -1;
+    int s = MatchScore(normalizedName, query);
+    if (s < 0) return -1;
+
+    // Scale score to [1000 - 4000] range so matching applications (4500+)
+    // will ALWAYS rank strictly above files and folders.
+    int fileScore = 1000 + (s * 3000) / 10000;
+    if (isDirectory) fileScore += 40;
+    return fileScore;
+}
+
 // UTF-16 positions are shared with DirectWrite and the Windows clipboard.
 class SearchInput {
 public:
@@ -273,6 +291,35 @@ public:
         Insert(L"");
     }
 };
+
+inline bool IsUninstaller(std::wstring_view name) {
+    const std::wstring normalized = Normalize(name);
+    return normalized.rfind(L"uninstall", 0) == 0 ||
+           normalized.rfind(L"unins", 0) == 0 ||
+           normalized.rfind(L"remove ", 0) == 0 ||
+           normalized.find(L"uninstaller") != std::wstring::npos ||
+           normalized == L"uninst";
+}
+
+inline bool IsHelperBinary(std::wstring_view name) {
+    const std::wstring normalized = Normalize(name);
+    return normalized == L"crashpad handler" ||
+           normalized == L"crashpad_handler" ||
+           normalized == L"squirrel" ||
+           normalized == L"notification helper" ||
+           normalized == L"notification_helper" ||
+           normalized == L"elevate" ||
+           normalized == L"installer" ||
+           normalized == L"update";
+}
+
+inline bool IsLaunchableExtension(std::wstring_view ext) {
+    std::wstring lower;
+    lower.reserve(ext.size());
+    for (wchar_t ch : ext) lower.push_back(static_cast<wchar_t>(towlower(ch)));
+    return lower == L".lnk" || lower == L".exe" ||
+           lower == L".appref-ms" || lower == L".url";
+}
 
 } // namespace takeoff
 

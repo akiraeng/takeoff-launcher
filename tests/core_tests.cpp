@@ -1,6 +1,7 @@
 #include "../src/search.h"
 #include "../src/settings.h"
 #include "../src/updates.h"
+#include "../src/file_index.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -56,6 +57,39 @@ int main() {
 
     // AppCategory distinction
     Check(AppCategory::System != AppCategory::Application, "categories are distinct");
+
+    // Uninstaller detection checks
+    Check(IsUninstaller(L"unins000"), "unins000 is recognized as uninstaller");
+    Check(IsUninstaller(L"unins001"), "unins001 is recognized as uninstaller");
+    Check(IsUninstaller(L"uninst"), "uninst is recognized as uninstaller");
+    Check(IsUninstaller(L"uninstall"), "uninstall is recognized as uninstaller");
+    Check(IsUninstaller(L"Uninstall App"), "Uninstall App is recognized as uninstaller");
+    Check(IsUninstaller(L"remove program"), "remove program is recognized as uninstaller");
+    Check(IsUninstaller(L"app uninstaller"), "app uninstaller is recognized as uninstaller");
+    Check(!IsUninstaller(L"universal"), "universal is not uninstaller");
+    Check(!IsUninstaller(L"unity"), "unity is not uninstaller");
+    Check(!IsUninstaller(L"notepad"), "notepad is not uninstaller");
+
+    // Helper / internal binary filtering checks
+    Check(IsHelperBinary(L"crashpad_handler"), "crashpad_handler filtered");
+    Check(IsHelperBinary(L"crashpad handler"), "crashpad handler filtered");
+    Check(IsHelperBinary(L"squirrel"), "squirrel filtered");
+    Check(IsHelperBinary(L"notification_helper"), "notification_helper filtered");
+    Check(IsHelperBinary(L"elevate"), "elevate filtered");
+    Check(IsHelperBinary(L"installer"), "installer filtered");
+    Check(IsHelperBinary(L"update"), "update filtered");
+    Check(!IsHelperBinary(L"code"), "code not helper binary");
+    Check(!IsHelperBinary(L"chrome"), "chrome not helper binary");
+
+    // Launchable file extensions checks
+    Check(IsLaunchableExtension(L".exe"), ".exe is launchable");
+    Check(IsLaunchableExtension(L".EXE"), ".EXE is launchable");
+    Check(IsLaunchableExtension(L".lnk"), ".lnk is launchable");
+    Check(IsLaunchableExtension(L".appref-ms"), ".appref-ms is launchable");
+    Check(IsLaunchableExtension(L".url"), ".url is launchable");
+    Check(!IsLaunchableExtension(L".dll"), ".dll is not launchable");
+    Check(!IsLaunchableExtension(L".txt"), ".txt is not launchable");
+    Check(!IsLaunchableExtension(L""), "empty extension is not launchable");
 
     SearchInput input;
     input.Insert(L"hello world");
@@ -248,6 +282,54 @@ int main() {
                   << liveTag << L'\n';
     }
 
+    // App recents preservation across index reload verification
+    {
+        struct TestApp {
+            std::wstring name;
+            std::wstring path;
+        };
+        std::vector<TestApp> oldApps = {
+            {L"App A", L"C:\\Path\\A.exe"},
+            {L"App B", L"C:\\Path\\B.exe"},
+            {L"App C", L"C:\\Path\\C.exe"},
+        };
+        // Suppose App B was launched (recent index 1) then App A (recent index 0)
+        std::vector<size_t> recentIndices = {1, 0};
+        std::vector<std::wstring> activeRecentPaths;
+        for (size_t i : recentIndices) {
+            if (i < oldApps.size()) activeRecentPaths.push_back(oldApps[i].path);
+        }
+
+        // New index arrives: App D added at top, sorting changed, App A and B exist at new indices
+        std::vector<TestApp> newApps = {
+            {L"App 0", L"C:\\Path\\0.exe"},
+            {L"App A", L"C:\\Path\\A.exe"}, // now index 1
+            {L"App B", L"C:\\Path\\B.exe"}, // now index 2
+            {L"App C", L"C:\\Path\\C.exe"}, // now index 3
+        };
+        std::vector<size_t> remappedRecent;
+        for (const auto& rPath : activeRecentPaths) {
+            for (size_t i = 0; i < newApps.size(); ++i) {
+                if (newApps[i].path == rPath) {
+                    remappedRecent.push_back(i);
+                    break;
+                }
+            }
+        }
+        Check(remappedRecent.size() == 2, "remapped recent count matches");
+        Check(remappedRecent[0] == 2, "App B remapped to new index 2");
+        Check(remappedRecent[1] == 1, "App A remapped to new index 1");
+    }
+
+    // Hotkey conflict text and binding test
+    {
+        HotkeyBinding conflictHotkey{kModAlt, kVkSpace};
+        std::wstring conflictText = L"The hotkey " + FormatBinding(conflictHotkey) +
+            L" is currently taken by another application and could not be registered.";
+        Check(conflictText.find(L"Alt + Space") != std::wstring::npos, "conflict text contains formatted hotkey Alt + Space");
+        Check(FormatBinding(conflictHotkey) == L"Alt + Space", "format default hotkey");
+    }
+
     // Performance check: 10,000 matches must execute in under 100ms
     const auto start = std::chrono::high_resolution_clock::now();
     int sum = 0;
@@ -260,6 +342,60 @@ int main() {
         std::chrono::high_resolution_clock::now() - start).count();
     Check(sum > 0, "benchmark computed positive score");
     Check(elapsed < 100, "10,000 matches executed in under 100ms");
+
+    // --- File Search & App Priority Tests ---
+    // 1. ScoreFile tests
+    Check(ScoreFile(L"document", L"") == -1, "ScoreFile empty query returns -1");
+    Check(ScoreFile(L"document", L"xyz") == -1, "ScoreFile non-matching returns -1");
+    int exactFileScore = ScoreFile(L"report", L"report", false);
+    int folderScore = ScoreFile(L"report", L"report", true);
+    Check(exactFileScore == 4000, "ScoreFile exact match is 4000");
+    Check(folderScore == 4040, "ScoreFile folder gets +40 bonus");
+    Check(ScoreFile(L"quarterly report 2026", L"report") > 0, "ScoreFile substring match");
+    Check(ScoreFile(L"quarterly report 2026", L"rep") > 0, "ScoreFile prefix match");
+
+    // 2. Strict Application > File Ranking Invariant
+    // Any matching app (even weakest fuzzy match, ~4500+) must score higher than the absolute best file match (4040).
+    int weakestAppScore = ScoreApp(L"abcdefghij", {}, L"aj");
+    Check(weakestAppScore >= 4500, "weakest app score is at least 4500");
+    Check(weakestAppScore > exactFileScore, "weakest app match strictly beats exact file match");
+    Check(weakestAppScore > folderScore, "weakest app match strictly beats exact folder match");
+
+    // Realistic scenario: query "code" matching both an app "Visual Studio Code" and a file "code.txt"
+    int appScore = ScoreApp(L"visual studio code", {L"vsc"}, L"code");
+    int fileScore = ScoreFile(L"code txt", L"code");
+    Check(appScore > fileScore, "app 'Visual Studio Code' strictly beats file 'code.txt'");
+
+    // 3. Settings enableFileSearch default and toggle
+    Settings defaultSettings;
+    Check(defaultSettings.enableFileSearch == true, "file search enabled by default in settings");
+    defaultSettings.enableFileSearch = false;
+    Check(!defaultSettings.enableFileSearch, "file search toggle can be disabled");
+
+    // 4. Zero-query app-only invariant:
+    // When input query is empty, FileIndex returns 0 results.
+    auto emptyQueryFileResults = FileIndex::Instance().Search(L"");
+    Check(emptyQueryFileResults.empty(), "empty query returns 0 files from FileIndex");
+
+    // 5. Live FileIndex background indexing & sub-millisecond search benchmark
+    FileIndex::Instance().Start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    const size_t indexedCount = FileIndex::Instance().Count();
+    std::cout << "[FileIndex] Live index populated " << indexedCount << " files/folders.\n";
+    Check(indexedCount > 0, "FileIndex populated files from disk");
+
+    // Benchmark 100 search queries on live in-memory index
+    const auto fileStart = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < 100; ++i) {
+        auto r = FileIndex::Instance().Search(L"project", 10);
+    }
+    const auto fileElapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::high_resolution_clock::now() - fileStart).count();
+    const double perQueryMs = (fileElapsed / 100.0) / 1000.0;
+    std::cout << "[FileIndex] 100 searches completed in " << fileElapsed << "us ("
+              << perQueryMs << "ms per query across " << indexedCount << " files!)\n";
+    Check(perQueryMs < 5.0, "file search evaluation executes in under 5ms per query");
+    FileIndex::Instance().Stop();
 
     std::cout << "All search, text editing, and hotkey checks passed in " << elapsed << "ms.\n";
 }

@@ -38,6 +38,7 @@ struct Settings {
     bool runAtStartup = false;
     bool showTrayIcon = true;
     bool checkForUpdates = true;
+    bool enableFileSearch = true;
 };
 
 inline std::wstring KeyName(uint16_t vk) {

@@ -11,6 +11,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <deque>
@@ -29,6 +30,7 @@
 #include "search.h"
 #include "settings.h"
 #include "updates.h"
+#include "file_index.h"
 
 namespace fs = std::filesystem;
 using Microsoft::WRL::ComPtr;
@@ -36,8 +38,11 @@ using takeoff::AppCategory;
 using takeoff::MatchScore;
 using takeoff::Normalize;
 using takeoff::ScoreApp;
+using takeoff::ScoreFile;
 using takeoff::SearchInput;
 using takeoff::Settings;
+using takeoff::FileIndex;
+using takeoff::kFilesReadyMessage;
 
 namespace {
 
@@ -57,6 +62,7 @@ constexpr UINT kTrayMessage = WM_APP + 3;
 constexpr UINT kIconReadyMessage = WM_APP + 4;
 constexpr UINT kUpdateCheckCompletedMessage = WM_APP + 5;
 constexpr UINT kExitLauncherMessage = WM_APP + 6;
+constexpr UINT kShellNotifyMessage = WM_APP + 7;
 constexpr UINT_PTR kCaretTimer = 1;
 constexpr UINT_PTR kHotkeyTimer = 2;
 constexpr UINT_PTR kRenderRetryTimer = 3;
@@ -83,42 +89,105 @@ int ScaleForDpi(int value, UINT dpi) {
 }
 
 bool IsLaunchableFile(const fs::path& path) {
-    std::wstring extension = path.extension().wstring();
-    std::transform(
-        extension.begin(), extension.end(), extension.begin(),
-        [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
-    return extension == L".lnk" || extension == L".exe" ||
-           extension == L".appref-ms" || extension == L".url";
+    return takeoff::IsLaunchableExtension(path.extension().wstring());
 }
 
-bool IsUninstaller(std::wstring_view name) {
-    const std::wstring normalized = Normalize(name);
-    return normalized.rfind(L"uninstall", 0) == 0 ||
-           normalized.rfind(L"remove ", 0) == 0 ||
-           normalized.find(L"uninstaller") != std::wstring::npos;
+std::wstring ExpandEnv(const wchar_t* path) {
+    wchar_t expanded[MAX_PATH * 2]{};
+    DWORD ret = ExpandEnvironmentStringsW(path, expanded, static_cast<DWORD>(std::size(expanded)));
+    if (ret > 0 && ret <= std::size(expanded)) {
+        return std::wstring(expanded);
+    }
+    return {};
 }
 
-void ScanDirectory(const fs::path& root, std::vector<AppEntry>& apps) {
+void ScanDirectoryBounded(const fs::path& root, std::vector<AppEntry>& apps,
+    int maxDepth = 4, const std::vector<std::wstring>& skipDirs = {}, bool exeOnly = false) {
     std::error_code error;
     if (!fs::exists(root, error)) return;
     fs::recursive_directory_iterator iterator(
         root, fs::directory_options::skip_permission_denied, error);
     const fs::recursive_directory_iterator end;
+
+    auto shouldSkipDir = [&](const fs::path& dirPath) {
+        std::wstring filename = dirPath.filename().wstring();
+        if (filename.empty()) return false;
+        if (filename[0] == L'.') return true;
+
+        std::wstring lower = filename;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+            [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+
+        if (lower == L"temp" || lower == L"tmp" || lower == L"packages" ||
+            lower == L"package cache" || lower == L"node_modules" ||
+            lower == L"crashdumps" || lower == L"stardock" ||
+            lower == L"start10ctrlpnl" || lower == L"start11ctrlpnl" ||
+            lower == L"start8ctrlpnl") {
+            return true;
+        }
+        if (lower.size() >= 8 && lower.compare(lower.size() - 8, 8, L"-updater") == 0) {
+            return true;
+        }
+        if (lower.size() >= 8 && lower.compare(lower.size() - 8, 8, L"_updater") == 0) {
+            return true;
+        }
+        for (const auto& skip : skipDirs) {
+            std::wstring skipLower = skip;
+            std::transform(skipLower.begin(), skipLower.end(), skipLower.begin(),
+                [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+            if (lower == skipLower) return true;
+        }
+        return false;
+    };
+
     while (iterator != end) {
         if (error) {
             error.clear();
             iterator.increment(error);
             continue;
         }
-        const fs::directory_entry& entry = *iterator;
-        if (entry.is_regular_file(error) && IsLaunchableFile(entry.path())) {
-            std::wstring name = entry.path().stem().wstring();
-            if (!name.empty() && !IsUninstaller(name)) {
-                apps.push_back({name, Normalize(name), entry.path().wstring()});
+        const auto& entry = *iterator;
+        if (entry.is_directory(error)) {
+            if (iterator.depth() >= maxDepth || shouldSkipDir(entry.path())) {
+                iterator.disable_recursion_pending();
+            }
+            iterator.increment(error);
+            continue;
+        }
+        if (entry.is_regular_file(error)) {
+            const auto ext = entry.path().extension().wstring();
+            const bool match = exeOnly
+                ? (_wcsicmp(ext.c_str(), L".exe") == 0)
+                : takeoff::IsLaunchableExtension(ext);
+            if (match) {
+                std::wstring name = entry.path().stem().wstring();
+                if (!name.empty() && !takeoff::IsUninstaller(name) && !takeoff::IsHelperBinary(name)) {
+                    std::wstring norm = Normalize(name);
+                    if (norm == L"app" || norm == L"launcher" || norm == L"main" || norm == L"run") {
+                        std::wstring parentName = entry.path().parent_path().filename().wstring();
+                        if (!parentName.empty() && !takeoff::IsHelperBinary(parentName) && !takeoff::IsUninstaller(parentName)) {
+                            std::wstring parentNorm = Normalize(parentName);
+                            apps.push_back({
+                                std::move(parentName),
+                                std::move(parentNorm),
+                                entry.path().wstring(),
+                                AppCategory::Application,
+                                {std::move(norm)}
+                            });
+                            iterator.increment(error);
+                            continue;
+                        }
+                    }
+                    apps.push_back({std::move(name), std::move(norm), entry.path().wstring()});
+                }
             }
         }
         iterator.increment(error);
     }
+}
+
+void ScanDirectory(const fs::path& root, std::vector<AppEntry>& apps) {
+    ScanDirectoryBounded(root, apps, 8, {});
 }
 
 void ScanAppsFolder(std::vector<AppEntry>& apps) {
@@ -133,7 +202,7 @@ void ScanAppsFolder(std::vector<AppEntry>& apps) {
     }
     IEnumIDList* enumerator = nullptr;
     if (SUCCEEDED(appsFolder->EnumObjects(
-            nullptr, SHCONTF_FOLDERS | SHCONTF_NONFOLDERS, &enumerator))) {
+            nullptr, SHCONTF_FOLDERS | SHCONTF_NONFOLDERS | SHCONTF_STORAGE | SHCONTF_FASTITEMS, &enumerator))) {
         PITEMID_CHILD child = nullptr;
         while (enumerator->Next(1, &child, nullptr) == S_OK) {
             STRRET displayNameResult{};
@@ -142,22 +211,59 @@ void ScanAppsFolder(std::vector<AppEntry>& apps) {
                     child, SHGDN_NORMAL, &displayNameResult)) &&
                 SUCCEEDED(StrRetToBufW(
                     &displayNameResult, child, displayName, MAX_PATH))) {
+
+                if (displayName[0] == L'@' || wcsstr(displayName, L"ms-resource:") == displayName) {
+                    wchar_t resolved[MAX_PATH]{};
+                    if (SUCCEEDED(SHLoadIndirectString(displayName, resolved, MAX_PATH, nullptr)) && resolved[0] != L'\0') {
+                        wcsncpy_s(displayName, resolved, _TRUNCATE);
+                    }
+                }
+
+                if (displayName[0] == L'@' || wcsstr(displayName, L"ms-resource:") == displayName || displayName[0] == L'\0') {
+                    CoTaskMemFree(child);
+                    child = nullptr;
+                    continue;
+                }
+
+                PWSTR parsingName = nullptr;
                 IShellItem* item = nullptr;
                 if (SUCCEEDED(SHCreateItemWithParent(
                         appsFolderId, appsFolder, child, IID_PPV_ARGS(&item)))) {
-                    PWSTR parsingName = nullptr;
-                    if (SUCCEEDED(item->GetDisplayName(
-                            SIGDN_PARENTRELATIVEPARSING, &parsingName))) {
-                        std::wstring name(displayName);
-                        if (!name.empty() && !IsUninstaller(name)) {
-                            apps.push_back({
-                                std::move(name), Normalize(displayName),
-                                std::wstring(L"shell:AppsFolder\\") + parsingName,
-                            });
-                        }
-                        CoTaskMemFree(parsingName);
+                    if (FAILED(item->GetDisplayName(SIGDN_PARENTRELATIVEPARSING, &parsingName))) {
+                        item->GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING, &parsingName);
                     }
                     item->Release();
+                }
+                if (!parsingName) {
+                    STRRET parseResult{};
+                    if (SUCCEEDED(appsFolder->GetDisplayNameOf(child, SHGDN_FORPARSING, &parseResult))) {
+                        wchar_t parseBuf[MAX_PATH * 2]{};
+                        if (SUCCEEDED(StrRetToBufW(&parseResult, child, parseBuf, static_cast<UINT>(std::size(parseBuf))))) {
+                            parsingName = _wcsdup(parseBuf);
+                        }
+                    }
+                }
+
+                if (parsingName) {
+                    std::wstring pName(parsingName);
+                    if (item) CoTaskMemFree(parsingName); else free(parsingName);
+
+                    std::wstring fullPath;
+                    if (pName.rfind(L"shell:AppsFolder\\", 0) == 0 || pName.rfind(L"shell:", 0) == 0) {
+                        fullPath = std::move(pName);
+                    } else {
+                        fullPath = L"shell:AppsFolder\\" + pName;
+                    }
+
+                    std::wstring name(displayName);
+                    while (!name.empty() && (name.back() == L' ' || name.back() == L'\t')) name.pop_back();
+
+                    if (!name.empty() && !takeoff::IsUninstaller(name) && !takeoff::IsHelperBinary(name)) {
+                        apps.push_back({
+                            std::move(name), Normalize(displayName),
+                            std::move(fullPath),
+                        });
+                    }
                 }
             }
             CoTaskMemFree(child);
@@ -394,8 +500,15 @@ std::vector<AppEntry> BuildAppIndex() {
         return apps;
     }
     PWSTR knownFolderPath = nullptr;
+    // 1. Start Menu (Current user and Common)
     if (SUCCEEDED(SHGetKnownFolderPath(
             FOLDERID_StartMenu, KF_FLAG_DEFAULT, nullptr, &knownFolderPath))) {
+        ScanDirectory(knownFolderPath, apps);
+        CoTaskMemFree(knownFolderPath);
+        knownFolderPath = nullptr;
+    }
+    if (SUCCEEDED(SHGetKnownFolderPath(
+            FOLDERID_Programs, KF_FLAG_DEFAULT, nullptr, &knownFolderPath))) {
         ScanDirectory(knownFolderPath, apps);
         CoTaskMemFree(knownFolderPath);
         knownFolderPath = nullptr;
@@ -404,14 +517,93 @@ std::vector<AppEntry> BuildAppIndex() {
             FOLDERID_CommonStartMenu, KF_FLAG_DEFAULT, nullptr, &knownFolderPath))) {
         ScanDirectory(knownFolderPath, apps);
         CoTaskMemFree(knownFolderPath);
+        knownFolderPath = nullptr;
     }
+    if (SUCCEEDED(SHGetKnownFolderPath(
+            FOLDERID_CommonPrograms, KF_FLAG_DEFAULT, nullptr, &knownFolderPath))) {
+        ScanDirectory(knownFolderPath, apps);
+        CoTaskMemFree(knownFolderPath);
+        knownFolderPath = nullptr;
+    }
+
+    // 2. Windows Shell AppsFolder (All Start Screen / UWP / Packaged apps)
     ScanAppsFolder(apps);
+
+    // 3. User & System locations for portable apps and executables:
+    // %USERPROFILE%\Desktop and Common Desktop
+    if (SUCCEEDED(SHGetKnownFolderPath(
+            FOLDERID_Desktop, KF_FLAG_DEFAULT, nullptr, &knownFolderPath))) {
+        ScanDirectoryBounded(knownFolderPath, apps, 2);
+        CoTaskMemFree(knownFolderPath);
+        knownFolderPath = nullptr;
+    }
+    if (SUCCEEDED(SHGetKnownFolderPath(
+            FOLDERID_PublicDesktop, KF_FLAG_DEFAULT, nullptr, &knownFolderPath))) {
+        ScanDirectoryBounded(knownFolderPath, apps, 2);
+        CoTaskMemFree(knownFolderPath);
+        knownFolderPath = nullptr;
+    }
+
+    // %USERPROFILE%\Downloads (portable EXEs only)
+    if (SUCCEEDED(SHGetKnownFolderPath(
+            FOLDERID_Downloads, KF_FLAG_DEFAULT, nullptr, &knownFolderPath))) {
+        ScanDirectoryBounded(knownFolderPath, apps, 2, {}, true);
+        CoTaskMemFree(knownFolderPath);
+        knownFolderPath = nullptr;
+    }
+
+    // %USERPROFILE%\Documents (portable EXEs only)
+    if (SUCCEEDED(SHGetKnownFolderPath(
+            FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr, &knownFolderPath))) {
+        ScanDirectoryBounded(knownFolderPath, apps, 3, {}, true);
+        CoTaskMemFree(knownFolderPath);
+        knownFolderPath = nullptr;
+    }
+
+    // %USERPROFILE%\Applications
+    {
+        std::wstring appsPath = ExpandEnv(L"%USERPROFILE%\\Applications");
+        if (!appsPath.empty()) {
+            ScanDirectoryBounded(appsPath, apps, 3);
+        }
+    }
+
+    // %LOCALAPPDATA%\Programs
+    {
+        std::wstring programsPath = ExpandEnv(L"%LOCALAPPDATA%\\Programs");
+        if (!programsPath.empty()) {
+            ScanDirectoryBounded(programsPath, apps, 3);
+        }
+    }
+
+    // %LOCALAPPDATA% (skipping Programs since scanned above, and skipping Temp, Packages, Stardock, etc.)
+    if (SUCCEEDED(SHGetKnownFolderPath(
+            FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &knownFolderPath))) {
+        ScanDirectoryBounded(knownFolderPath, apps, 2, {L"Programs", L"Stardock"}, true);
+        CoTaskMemFree(knownFolderPath);
+        knownFolderPath = nullptr;
+    }
+
+    // %PROGRAMDATA% (skipping Microsoft folder where Start Menu was already scanned)
+    if (SUCCEEDED(SHGetKnownFolderPath(
+            FOLDERID_ProgramData, KF_FLAG_DEFAULT, nullptr, &knownFolderPath))) {
+        ScanDirectoryBounded(knownFolderPath, apps, 2, {L"Microsoft", L"Stardock"}, true);
+        CoTaskMemFree(knownFolderPath);
+        knownFolderPath = nullptr;
+    }
+
     std::unordered_set<std::wstring> seenNames;
+    std::unordered_set<std::wstring> seenPaths;
     std::vector<AppEntry> uniqueApps;
     uniqueApps.reserve(apps.size() + 70);
     for (auto& app : apps) {
-        if (seenNames.insert(app.normalizedName).second) {
-            uniqueApps.push_back(std::move(app));
+        std::wstring normPath = app.path;
+        std::transform(normPath.begin(), normPath.end(), normPath.begin(),
+            [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+        if (seenPaths.insert(normPath).second) {
+            if (seenNames.insert(app.normalizedName).second) {
+                uniqueApps.push_back(std::move(app));
+            }
         }
     }
     AddSystemItems(uniqueApps);
@@ -445,8 +637,12 @@ ComPtr<IWICBitmapSource> LoadIconSource(IWICImagingFactory* wic,
         HBITMAP bitmap = nullptr;
         // Request the jumbo 256px icon so we downscale a sharp source
         // instead of upscaling the small 32px variant.
-        if (SUCCEEDED(imageFactory->GetImage({256, 256},
+        if (FAILED(imageFactory->GetImage({256, 256},
                 SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK, &bitmap))) {
+            imageFactory->GetImage({static_cast<LONG>(size), static_cast<LONG>(size)},
+                SIIGBF_BIGGERSIZEOK, &bitmap);
+        }
+        if (bitmap) {
             ComPtr<IWICBitmap> converted;
             if (SUCCEEDED(wic->CreateBitmapFromHBITMAP(bitmap, nullptr,
                     WICBitmapUsePremultipliedAlpha, &converted))) {

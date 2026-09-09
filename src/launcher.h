@@ -5,6 +5,7 @@ class LauncherWindow {
 public:
     bool Create(HINSTANCE instance) {
         LoadSettings();
+        EnsureStartMenuShortcut();
         if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, factory_.GetAddressOf())) ||
             FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
                 reinterpret_cast<IUnknown**>(writeFactory_.GetAddressOf())))) {
@@ -42,6 +43,27 @@ public:
             iconThread_ = std::thread([this] { IconWorkerMain(); });
         } catch (const std::system_error&) {
             // Without the worker the launcher still runs with letter placeholders.
+        }
+        indexStopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        indexTriggerEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if constexpr (!kUiTest) {
+            SHChangeNotifyEntry notifyEntry{};
+            notifyEntry.pidl = nullptr;
+            notifyEntry.fRecursive = TRUE;
+            shellNotifyId_ = SHChangeNotifyRegister(
+                hwnd_,
+                SHCNRF_ShellLevel | SHCNRF_NewDelivery,
+                SHCNE_ALLEVENTS,
+                kShellNotifyMessage,
+                1,
+                &notifyEntry
+            );
+        }
+        try {
+            indexWorkerThread_ = std::thread([this] { IndexWorkerMain(); });
+        } catch (const std::system_error&) {}
+        if constexpr (!kUiTest) {
+            FileIndex::Instance().Start(hwnd_);
         }
         SetTimer(hwnd_, kHotkeyTimer, 2000, nullptr);
         CheckForUpdatesAsync(true);
@@ -130,11 +152,31 @@ private:
         case kTrayMessage:
             HandleTrayMessage(LOWORD(lParam));
             return 0;
+        case kShellNotifyMessage: {
+            HANDLE lock = SHChangeNotification_Lock(
+                reinterpret_cast<HANDLE>(wParam),
+                static_cast<DWORD>(lParam),
+                nullptr, nullptr);
+            if (lock) {
+                SHChangeNotification_Unlock(lock);
+            }
+            TriggerAppReindex();
+            return 0;
+        }
         case kAppsReadyMessage: {
             std::unique_ptr<std::vector<AppEntry>> incoming(
                 reinterpret_cast<std::vector<AppEntry>*>(lParam));
+            std::vector<std::wstring> activeRecentPaths;
+            for (size_t i : recent_) {
+                if (i < apps_.size()) {
+                    activeRecentPaths.push_back(apps_[i].path);
+                }
+            }
             apps_ = std::move(*incoming);
             indexReady_ = true;
+            if (!activeRecentPaths.empty()) {
+                recentPaths_ = std::move(activeRecentPaths);
+            }
             recent_.clear();
             for (const auto& rPath : recentPaths_) {
                 for (size_t i = 0; i < apps_.size(); ++i) {
@@ -146,7 +188,14 @@ private:
                     }
                 }
             }
+            baseAppsCount_ = apps_.size();
             UpdateResults();
+            return 0;
+        }
+        case kFilesReadyMessage: {
+            if (page_ == Page::Launcher && !input_.text.empty() && settings_.enableFileSearch) {
+                UpdateResults();
+            }
             return 0;
         }
         case kIconReadyMessage: {
@@ -201,6 +250,7 @@ private:
             }
             return 0;
         case WM_CHAR:
+            if (ShouldShowHotkeyWarning()) return 0;
             if (page_ == Page::Launcher && !actionsOpen_ && wParam >= L' ' && wParam != 0x7F &&
                 (!(GetKeyState(VK_CONTROL) & 0x8000) || (GetKeyState(VK_MENU) & 0x8000))) {
                 const wchar_t ch = static_cast<wchar_t>(wParam);
@@ -300,6 +350,11 @@ private:
                 GetCursorPos(&point);
                 ScreenToClient(hwnd_, &point);
                 const float x = ToDip(point.x), y = ToDip(point.y);
+                if (ShouldShowHotkeyWarning()) {
+                    const bool hand = PointInHotkeyWarningSettings(x, y) || PointInHotkeyWarningDismiss(x, y);
+                    SetCursor(LoadCursorW(nullptr, hand ? IDC_HAND : IDC_ARROW));
+                    return TRUE;
+                }
                 const bool text = page_ == Page::Launcher && !actionsOpen_ &&
                     y < kSearchHeight && x >= kTextLeft && x < width_ - 86;
                 const bool button = page_ == Page::Settings ||
@@ -331,6 +386,24 @@ private:
             ResizeAndPosition();
             return 0;
         case WM_DESTROY: {
+            if (shellNotifyId_) {
+                SHChangeNotifyDeregister(shellNotifyId_);
+                shellNotifyId_ = 0;
+            }
+            if (indexStopEvent_) {
+                SetEvent(indexStopEvent_);
+            }
+            if (indexWorkerThread_.joinable()) {
+                indexWorkerThread_.join();
+            }
+            if (indexStopEvent_) {
+                CloseHandle(indexStopEvent_);
+                indexStopEvent_ = nullptr;
+            }
+            if (indexTriggerEvent_) {
+                CloseHandle(indexTriggerEvent_);
+                indexTriggerEvent_ = nullptr;
+            }
             {
                 std::lock_guard<std::mutex> lock(iconMutex_);
                 iconStop_ = true;
@@ -338,6 +411,9 @@ private:
             iconCv_.notify_one();
             if (iconThread_.joinable()) iconThread_.join();
             if (updateThread_.joinable()) updateThread_.join();
+            if constexpr (!kUiTest) {
+                FileIndex::Instance().Stop();
+            }
             KillTimer(hwnd_, kCaretTimer);
             KillTimer(hwnd_, kHotkeyTimer);
             KillTimer(hwnd_, kRenderRetryTimer);
@@ -423,6 +499,7 @@ private:
                 }
                 settings_.showTrayIcon = ReadDword(key, L"ShowTrayIcon", 1) != 0;
                 settings_.checkForUpdates = ReadDword(key, L"CheckForUpdates", 1) != 0;
+                settings_.enableFileSearch = ReadDword(key, L"FileSearchEnabled", 1) != 0;
                 const DWORD low = ReadDword(key, L"LastUpdateCheckLow", 0);
                 const DWORD high = ReadDword(key, L"LastUpdateCheckHigh", 0);
                 lastUpdateCheck_ = (static_cast<uint64_t>(high) << 32) | low;
@@ -533,6 +610,7 @@ private:
                 {L"QuickOff", settings_.quickLaunchHotkey.disabled ? 1u : 0u},
                 {L"ShowTrayIcon", settings_.showTrayIcon ? 1u : 0u},
                 {L"CheckForUpdates", settings_.checkForUpdates ? 1u : 0u},
+                {L"FileSearchEnabled", settings_.enableFileSearch ? 1u : 0u},
             };
             bool saved = true;
             for (const auto& entry : entries) {
@@ -618,6 +696,68 @@ private:
         }
     }
 
+    bool CreateStartMenuShortcut() {
+        if constexpr (kUiTest) return true;
+        wchar_t executable[MAX_PATH]{};
+        if (!GetModuleFileNameW(nullptr, executable, MAX_PATH)) return false;
+
+        PWSTR programsPath = nullptr;
+        if (FAILED(SHGetKnownFolderPath(FOLDERID_Programs, KF_FLAG_CREATE, nullptr, &programsPath))) {
+            return false;
+        }
+
+        std::wstring shortcutPath = std::wstring(programsPath) + L"\\Takeoff.lnk";
+        CoTaskMemFree(programsPath);
+
+        ComPtr<IShellLinkW> shellLink;
+        if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&shellLink)))) {
+            return false;
+        }
+
+        shellLink->SetPath(executable);
+        fs::path exeFs(executable);
+        shellLink->SetWorkingDirectory(exeFs.parent_path().c_str());
+        shellLink->SetDescription(L"Takeoff App Launcher");
+
+        ComPtr<IPersistFile> persistFile;
+        if (FAILED(shellLink.As(&persistFile))) {
+            return false;
+        }
+
+        if (SUCCEEDED(persistFile->Save(shortcutPath.c_str(), TRUE))) {
+            SHChangeNotify(SHCNE_CREATE, SHCNF_PATHW, shortcutPath.c_str(), nullptr);
+            return true;
+        }
+        return false;
+    }
+
+    void EnsureStartMenuShortcut() {
+        if constexpr (kUiTest) return;
+        HKEY key = nullptr;
+        DWORD added = 0;
+        DWORD size = sizeof(added);
+        bool shouldAdd = false;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, kSettingsRegistryPath, 0, KEY_READ | KEY_WRITE, &key) == ERROR_SUCCESS) {
+            if (RegGetValueW(key, nullptr, L"AddedToStartMenu", RRF_RT_REG_DWORD, nullptr, &added, &size) != ERROR_SUCCESS) {
+                shouldAdd = true;
+            }
+        } else {
+            shouldAdd = true;
+        }
+
+        if (shouldAdd) {
+            CreateStartMenuShortcut();
+            if (!key) {
+                RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsRegistryPath, 0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr);
+            }
+            if (key) {
+                added = 1;
+                RegSetValueExW(key, L"AddedToStartMenu", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&added), sizeof(added));
+            }
+        }
+        if (key) RegCloseKey(key);
+    }
+
     void UpdateTrayIcon() {
         if constexpr (!kUiTest) {
             if (!settings_.showTrayIcon) {
@@ -665,6 +805,7 @@ private:
         if (!menu) return;
         AppendMenuW(menu, MF_STRING, 1, L"Open Takeoff");
         AppendMenuW(menu, MF_STRING, 2, L"Settings");
+        AppendMenuW(menu, MF_STRING, 4, L"Reload Programs");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, 3, L"Exit");
         SetForegroundWindow(hwnd_);
@@ -674,6 +815,7 @@ private:
         if (command == 1) Show();
         else if (command == 2) { Show(); OpenSettings(); }
         else if (command == 3) DestroyWindow(hwnd_);
+        else if (command == 4) TriggerAppReindex();
     }
 
     void ApplyBackdrop() {
@@ -765,6 +907,7 @@ private:
     void Show() {
         KillTimer(hwnd_, kTrimTimer);
         page_ = Page::Launcher;
+        hotkeyWarningDismissed_ = false;
         input_.Clear();
         pendingSurrogate_ = 0;
         composition_.clear();
@@ -780,6 +923,13 @@ private:
         SetForegroundWindow(hwnd_);
         SetFocus(hwnd_);
         ResetCaret();
+        if constexpr (!kUiTest) {
+            const auto now = std::chrono::steady_clock::now();
+            if (lastIndexTime_.time_since_epoch().count() > 0 &&
+                now - lastIndexTime_ > std::chrono::minutes(5)) {
+                TriggerAppReindex();
+            }
+        }
     }
 
     void OpenSettings() {
@@ -847,6 +997,9 @@ private:
     void UpdateResults() {
         results_.clear();
         hoverLockRow_ = -1;
+        if (apps_.size() > baseAppsCount_) {
+            apps_.resize(baseAppsCount_);
+        }
         const std::wstring query = Normalize(input_.text);
         if (input_.text.empty()) {
             for (size_t index : recent_) {
@@ -866,6 +1019,19 @@ private:
                 }
                 const int score = takeoff::ScoreApp(apps_[i].normalizedName, apps_[i].aliases, query, recencyRank);
                 if (score >= 0) ranked.push_back({i, score});
+            }
+            if (settings_.enableFileSearch) {
+                const auto fileResults = takeoff::FileIndex::Instance().Search(query, 30);
+                for (const auto& item : fileResults) {
+                    AppEntry entry;
+                    entry.name = item.name;
+                    entry.path = item.path;
+                    entry.normalizedName = Normalize(entry.name);
+                    entry.category = item.isDirectory ? takeoff::AppCategory::Folder : takeoff::AppCategory::File;
+                    const size_t newIdx = apps_.size();
+                    apps_.push_back(std::move(entry));
+                    ranked.push_back({newIdx, item.score});
+                }
             }
             std::sort(ranked.begin(), ranked.end(), [this](const RankedResult& a, const RankedResult& b) {
                 return a.score != b.score ? a.score > b.score : apps_[a.appIndex].name < apps_[b.appIndex].name;
@@ -911,7 +1077,7 @@ private:
 
     void ChangeSetting(int row) {
         settingsStatus_.clear();
-        if (row == 7) {
+        if (row == 8) {
             ResetToDefaults();
             return;
         }
@@ -941,6 +1107,11 @@ private:
             } else {
                 CheckForUpdatesAsync(true);
             }
+            break;
+        case 7:
+            settings_.enableFileSearch = !settings_.enableFileSearch;
+            SaveSettings();
+            UpdateResults();
             break;
         }
         InvalidateRect(hwnd_, nullptr, FALSE);
@@ -1121,6 +1292,19 @@ private:
     }
 
     LRESULT HandleKeyDown(WPARAM key, LPARAM lParam) {
+        if (ShouldShowHotkeyWarning()) {
+            if (key == VK_ESCAPE) {
+                hotkeyWarningDismissed_ = true;
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return 0;
+            }
+            if (key == VK_RETURN || key == VK_SPACE) {
+                OpenSettings();
+                recordingRow_ = 0;
+                return 0;
+            }
+            return 0;
+        }
         const bool control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         const bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
@@ -1133,9 +1317,11 @@ private:
                 CloseSettings();
             } else if (key == VK_UP || (key == VK_TAB && shift)) {
                 settingsSelected_ = (settingsSelected_ + 7) % 8;
+                settingsSelected_ = (settingsSelected_ + 8) % 9;
                 InvalidateRect(hwnd_, nullptr, FALSE);
             } else if (key == VK_DOWN || key == VK_TAB) {
                 settingsSelected_ = (settingsSelected_ + 1) % 8;
+                settingsSelected_ = (settingsSelected_ + 1) % 9;
                 InvalidateRect(hwnd_, nullptr, FALSE);
             } else if (key == VK_LEFT || key == VK_RIGHT ||
                        key == VK_RETURN || key == VK_SPACE) {
@@ -1287,12 +1473,22 @@ private:
             : app.parameters;
         const wchar_t* params = paramsStr.empty() ? nullptr : paramsStr.c_str();
 
+        std::wstring workingDir;
+        if (!isProtocol) {
+            std::error_code ec;
+            fs::path p(path);
+            if (p.has_parent_path()) {
+                workingDir = p.parent_path().wstring();
+            }
+        }
+        const wchar_t* dir = workingDir.empty() ? nullptr : workingDir.c_str();
+
         INT_PTR result = reinterpret_cast<INT_PTR>(
             ShellExecuteW(hwnd_, (asAdministrator && !isProtocol) ? L"runas" : L"open",
-                fileToExec, params, nullptr, SW_SHOWNORMAL));
+                fileToExec, params, dir, SW_SHOWNORMAL));
         if (result <= 32 && asAdministrator && !isProtocol) {
             result = reinterpret_cast<INT_PTR>(
-                ShellExecuteW(hwnd_, L"open", fileToExec, params, nullptr, SW_SHOWNORMAL));
+                ShellExecuteW(hwnd_, L"open", fileToExec, params, dir, SW_SHOWNORMAL));
         }
 
         if (result <= 32) {
@@ -1300,6 +1496,7 @@ private:
             SetForegroundWindow(hwnd_);
             SetFocus(hwnd_);
             status_ = L"Could not open this app. Try another result.";
+            status_ = L"Could not open this item. Try another result.";
             ResetCaret();
             InvalidateRect(hwnd_, nullptr, FALSE);
         } else {
@@ -1307,6 +1504,13 @@ private:
             recent_.insert(recent_.begin(), index);
             if (recent_.size() > 8) recent_.resize(8);
             SaveRecent();
+            if (app.category == takeoff::AppCategory::Application ||
+                app.category == takeoff::AppCategory::System) {
+                recent_.erase(std::remove(recent_.begin(), recent_.end(), index), recent_.end());
+                recent_.insert(recent_.begin(), index);
+                if (recent_.size() > 8) recent_.resize(8);
+                SaveRecent();
+            }
         }
     }
 
@@ -1334,8 +1538,27 @@ private:
         if (!HasResult()) return;
         actionsOpen_ = false;
         actionsPositioned_ = false;
-        if (action == 0) { LaunchSelected(true); return; }
         const AppEntry& app = apps_[results_[selected_]];
+        const bool isFileOrFolder = (app.category == takeoff::AppCategory::File ||
+                                     app.category == takeoff::AppCategory::Folder);
+        if (isFileOrFolder) {
+            if (action == 0) {
+                LaunchSelected(false);
+                return;
+            } else if (action == 1) {
+                std::wstring param = L"/select,\"" + app.path + L"\"";
+                ShellExecuteW(nullptr, L"open", L"explorer.exe", param.c_str(), nullptr, SW_SHOWNORMAL);
+                Hide();
+                return;
+            } else if (action == 2) {
+                const bool copied = CopyText(app.path);
+                status_ = copied ? L"File path copied" : L"Clipboard is busy. Try again.";
+                ResetCaret();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return;
+            }
+        }
+        if (action == 0) { LaunchSelected(true); return; }
         const bool copied = CopyText(action == 1 ? app.name : app.path);
         status_ = copied ? (action == 1 ? L"App name copied" : L"Launch path copied")
                          : L"Clipboard is busy. Try again.";
@@ -1371,6 +1594,16 @@ private:
     void HandleClick(float x, float y) {
         SetFocus(hwnd_);
         hoverLockRow_ = -1;
+        if (ShouldShowHotkeyWarning()) {
+            if (PointInHotkeyWarningSettings(x, y)) {
+                OpenSettings();
+                recordingRow_ = 0;
+            } else if (PointInHotkeyWarningDismiss(x, y) || !PointInHotkeyWarningCard(x, y)) {
+                hotkeyWarningDismissed_ = true;
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return;
+        }
         if (page_ == Page::Settings) {
             if (y < kSettingsHeaderHeight && x < 64) {
                 CloseSettings();
@@ -1379,6 +1612,7 @@ private:
             const float resetLeft = width_ - 136.0f, resetRight = width_ - 20.0f;
             if (y >= 10.0f && y <= 36.0f && x >= resetLeft && x <= resetRight) {
                 settingsSelected_ = 7;
+                settingsSelected_ = 8;
                 ResetToDefaults();
                 return;
             }
@@ -1388,6 +1622,7 @@ private:
             if (y >= keyboardTop && y < keyboardTop + 4 * kSettingsRowHeight) {
                 row = static_cast<int>((y - keyboardTop) / kSettingsRowHeight);
             } else if (y >= generalTop && y < generalTop + 3 * kSettingsRowHeight) {
+            } else if (y >= generalTop && y < generalTop + 4 * kSettingsRowHeight) {
                 row = 4 + static_cast<int>((y - generalTop) / kSettingsRowHeight);
             }
             if (row >= 0) {
@@ -1464,6 +1699,17 @@ private:
             trackingMouse_ = true;
         }
         if (dragging_) { PlaceCaret(x, true); return; }
+        if (ShouldShowHotkeyWarning()) {
+            if (mouseKnown_) {
+                const bool prevHover = PointInHotkeyWarningSettings(mouseX_, mouseY_) || PointInHotkeyWarningDismiss(mouseX_, mouseY_);
+                const bool newHover = PointInHotkeyWarningSettings(x, y) || PointInHotkeyWarningDismiss(x, y);
+                if (prevHover != newHover) {
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                }
+            }
+            mouseX_ = x; mouseY_ = y; mouseKnown_ = true;
+            return;
+        }
         if (page_ == Page::Settings) {
             constexpr float keyboardTop = 68.0f;
             constexpr float generalTop = 280.0f;
@@ -1471,9 +1717,11 @@ private:
             int row = -1;
             if (y >= 10.0f && y <= 36.0f && x >= resetLeft && x <= resetRight) {
                 row = 7;
+                row = 8;
             } else if (y >= keyboardTop && y < keyboardTop + 4 * kSettingsRowHeight) {
                 row = static_cast<int>((y - keyboardTop) / kSettingsRowHeight);
             } else if (y >= generalTop && y < generalTop + 3 * kSettingsRowHeight) {
+            } else if (y >= generalTop && y < generalTop + 4 * kSettingsRowHeight) {
                 row = 4 + static_cast<int>((y - generalTop) / kSettingsRowHeight);
             }
             if (row >= 0 && row != settingsSelected_) {
@@ -1602,6 +1850,151 @@ private:
         }
         wic.Reset();
         if (SUCCEEDED(com)) CoUninitialize();
+    }
+
+    void TriggerAppReindex() {
+        if (indexTriggerEvent_) {
+            SetEvent(indexTriggerEvent_);
+        }
+    }
+
+    void IndexWorkerMain() {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+        const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+        HANDLE hUserStartMenu = nullptr;
+        HANDLE hCommonStartMenu = nullptr;
+        HANDLE hDesktop = nullptr;
+
+        if constexpr (!kUiTest) {
+            PWSTR userStartMenuPath = nullptr;
+            if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_StartMenu, KF_FLAG_DEFAULT, nullptr, &userStartMenuPath))) {
+                hUserStartMenu = FindFirstChangeNotificationW(
+                    userStartMenuPath, TRUE,
+                    FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
+                    FILE_NOTIFY_CHANGE_LAST_WRITE);
+                CoTaskMemFree(userStartMenuPath);
+            }
+            PWSTR commonStartMenuPath = nullptr;
+            if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_CommonStartMenu, KF_FLAG_DEFAULT, nullptr, &commonStartMenuPath))) {
+                hCommonStartMenu = FindFirstChangeNotificationW(
+                    commonStartMenuPath, TRUE,
+                    FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
+                    FILE_NOTIFY_CHANGE_LAST_WRITE);
+                CoTaskMemFree(commonStartMenuPath);
+            }
+            PWSTR desktopPath = nullptr;
+            if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, KF_FLAG_DEFAULT, nullptr, &desktopPath))) {
+                hDesktop = FindFirstChangeNotificationW(
+                    desktopPath, TRUE,
+                    FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
+                    FILE_NOTIFY_CHANGE_LAST_WRITE);
+                CoTaskMemFree(desktopPath);
+            }
+        }
+
+        auto runIndex = [this]() {
+            auto apps = std::make_unique<std::vector<AppEntry>>();
+            try {
+                *apps = BuildAppIndex();
+            } catch (const fs::filesystem_error&) {}
+            if (WaitForSingleObject(indexStopEvent_, 0) != WAIT_OBJECT_0) {
+                if (PostMessageW(hwnd_, kAppsReadyMessage, 0,
+                        reinterpret_cast<LPARAM>(apps.get()))) {
+                    apps.release();
+                    lastIndexTime_ = std::chrono::steady_clock::now();
+                }
+            }
+        };
+
+        // Perform initial index build
+        runIndex();
+
+        std::vector<HANDLE> waitHandles;
+        if (indexStopEvent_) waitHandles.push_back(indexStopEvent_);
+        if (indexTriggerEvent_) waitHandles.push_back(indexTriggerEvent_);
+        if (hUserStartMenu && hUserStartMenu != INVALID_HANDLE_VALUE) {
+            waitHandles.push_back(hUserStartMenu);
+        }
+        if (hCommonStartMenu && hCommonStartMenu != INVALID_HANDLE_VALUE) {
+            waitHandles.push_back(hCommonStartMenu);
+        }
+        if (hDesktop && hDesktop != INVALID_HANDLE_VALUE) {
+            waitHandles.push_back(hDesktop);
+        }
+
+        while (!waitHandles.empty()) {
+            const DWORD wait = WaitForMultipleObjects(
+                static_cast<DWORD>(waitHandles.size()),
+                waitHandles.data(),
+                FALSE,
+                INFINITE);
+
+            if (wait == WAIT_OBJECT_0) {
+                // indexStopEvent_ was signaled
+                break;
+            }
+
+            if (wait >= WAIT_OBJECT_0 + 1 && wait < WAIT_OBJECT_0 + waitHandles.size()) {
+                const HANDLE signaled = waitHandles[wait - WAIT_OBJECT_0];
+                if (signaled == hUserStartMenu) {
+                    FindNextChangeNotification(hUserStartMenu);
+                } else if (signaled == hCommonStartMenu) {
+                    FindNextChangeNotification(hCommonStartMenu);
+                } else if (signaled == hDesktop) {
+                    FindNextChangeNotification(hDesktop);
+                }
+
+                // Debounce quiet period: wait 750ms for filesystem changes to settle
+                bool debounce = true;
+                while (debounce) {
+                    const DWORD debWait = WaitForMultipleObjects(
+                        static_cast<DWORD>(waitHandles.size()),
+                        waitHandles.data(),
+                        FALSE,
+                        750);
+
+                    if (debWait == WAIT_OBJECT_0) {
+                        debounce = false;
+                        break;
+                    } else if (debWait == WAIT_TIMEOUT) {
+                        debounce = false;
+                    } else if (debWait >= WAIT_OBJECT_0 + 1 && debWait < WAIT_OBJECT_0 + waitHandles.size()) {
+                        const HANDLE nextSignaled = waitHandles[debWait - WAIT_OBJECT_0];
+                        if (nextSignaled == hUserStartMenu) {
+                            FindNextChangeNotification(hUserStartMenu);
+                        } else if (nextSignaled == hCommonStartMenu) {
+                            FindNextChangeNotification(hCommonStartMenu);
+                        } else if (nextSignaled == hDesktop) {
+                            FindNextChangeNotification(hDesktop);
+                        }
+                    } else {
+                        debounce = false;
+                    }
+                }
+
+                if (WaitForSingleObject(indexStopEvent_, 0) == WAIT_OBJECT_0) {
+                    break;
+                }
+
+                runIndex();
+            } else {
+                break;
+            }
+        }
+
+        if (hUserStartMenu && hUserStartMenu != INVALID_HANDLE_VALUE) {
+            FindCloseChangeNotification(hUserStartMenu);
+        }
+        if (hCommonStartMenu && hCommonStartMenu != INVALID_HANDLE_VALUE) {
+            FindCloseChangeNotification(hCommonStartMenu);
+        }
+        if (hDesktop && hDesktop != INVALID_HANDLE_VALUE) {
+            FindCloseChangeNotification(hDesktop);
+        }
+        if (SUCCEEDED(com)) {
+            CoUninitialize();
+        }
     }
 
     void LockHoverAtPointer() {
@@ -1902,12 +2295,27 @@ private:
                 Fill(iconRect, D2D1::ColorF(0x555B71), 6);
                 Text(app.name.substr(0, 1), iconRect, resultFormat_.Get(), D2D1::ColorF(0xFFFFFF),
                     DWRITE_TEXT_ALIGNMENT_CENTER);
+                if (app.category == takeoff::AppCategory::Folder) {
+                    Fill(iconRect, D2D1::ColorF(0xD97706), 6);
+                    Text(L"F", iconRect, resultFormat_.Get(), D2D1::ColorF(0xFFFFFF),
+                        DWRITE_TEXT_ALIGNMENT_CENTER);
+                } else if (app.category == takeoff::AppCategory::File) {
+                    Fill(iconRect, D2D1::ColorF(0x4B5563), 6);
+                    Text(L"F", iconRect, resultFormat_.Get(), D2D1::ColorF(0xFFFFFF),
+                        DWRITE_TEXT_ALIGNMENT_CENTER);
+                } else {
+                    Fill(iconRect, D2D1::ColorF(0x555B71), 6);
+                    Text(app.name.substr(0, 1), iconRect, resultFormat_.Get(), D2D1::ColorF(0xFFFFFF),
+                        DWRITE_TEXT_ALIGNMENT_CENTER);
+                }
             }
             Text(app.name, D2D1::RectF(60, top, width_ - 158, top + 40), resultFormat_.Get(), textColor);
             const bool recent = input_.text.empty() &&
                 std::find(recent_.begin(), recent_.end(), results_[i]) != recent_.end();
             const wchar_t* categoryLabel = recent ? L"Recent"
-                : (app.category == takeoff::AppCategory::System ? L"System" : L"Application");
+                : (app.category == takeoff::AppCategory::System ? L"System"
+                : (app.category == takeoff::AppCategory::Folder ? L"Folder"
+                : (app.category == takeoff::AppCategory::File ? L"File" : L"Application")));
             Text(categoryLabel,
                 D2D1::RectF(width_ - 154, top, width_ - 28, top + 40), hintFormat_.Get(),
                 highContrast_ && selected ? textColor : Muted(), DWRITE_TEXT_ALIGNMENT_TRAILING);
@@ -1952,6 +2360,129 @@ private:
             D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 
+    bool ShouldShowHotkeyWarning() const {
+        return page_ == Page::Launcher &&
+               !hotkeyRegistered_ &&
+               !settings_.launcherHotkey.disabled &&
+               settings_.launcherHotkey.key != 0 &&
+               !hotkeyWarningDismissed_;
+    }
+
+    D2D1_RECT_F HotkeyWarningCardRect() const {
+        constexpr float cardWidth = 480.0f;
+        constexpr float cardHeight = 240.0f;
+        const float left = (width_ - cardWidth) / 2.0f;
+        const float top = (height_ - cardHeight) / 2.0f;
+        return D2D1::RectF(left, top, left + cardWidth, top + cardHeight);
+    }
+
+    D2D1_RECT_F HotkeyWarningSettingsButtonRect() const {
+        const auto card = HotkeyWarningCardRect();
+        constexpr float buttonHeight = 34.0f;
+        const float bottom = card.bottom - 22.0f;
+        const float top = bottom - buttonHeight;
+        return D2D1::RectF(card.left + 142.0f, top, card.right - 24.0f, bottom);
+    }
+
+    D2D1_RECT_F HotkeyWarningDismissButtonRect() const {
+        const auto card = HotkeyWarningCardRect();
+        constexpr float buttonHeight = 34.0f;
+        const float bottom = card.bottom - 22.0f;
+        const float top = bottom - buttonHeight;
+        return D2D1::RectF(card.left + 24.0f, top, card.left + 130.0f, bottom);
+    }
+
+    bool PointInHotkeyWarningSettings(float x, float y) const {
+        if (!ShouldShowHotkeyWarning()) return false;
+        const auto r = HotkeyWarningSettingsButtonRect();
+        return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    }
+
+    bool PointInHotkeyWarningDismiss(float x, float y) const {
+        if (!ShouldShowHotkeyWarning()) return false;
+        const auto r = HotkeyWarningDismissButtonRect();
+        return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    }
+
+    bool PointInHotkeyWarningCard(float x, float y) const {
+        if (!ShouldShowHotkeyWarning()) return false;
+        const auto r = HotkeyWarningCardRect();
+        return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    }
+
+    void DrawHotkeyWarningModal() {
+        if (!ShouldShowHotkeyWarning()) return;
+
+        // Frosted semi-transparent overlay covering full launcher window
+        Fill(D2D1::RectF(0, 0, width_, height_),
+            highContrast_ ? D2D1::ColorF(0, 0, 0, 0.85f) : D2D1::ColorF(0x0C0C0E, 0.80f), 8.0f);
+
+        const auto card = HotkeyWarningCardRect();
+
+        // Drop shadow behind modal card
+        Fill(D2D1::RectF(card.left - 6, card.top - 2, card.right + 6, card.bottom + 8),
+            D2D1::ColorF(0, 0, 0, 0.35f), 14.0f);
+
+        // Modal card surface
+        Fill(card, highContrast_ ? SystemColor(COLOR_WINDOW) : D2D1::ColorF(0x1F1F23), 10.0f);
+        brush_->SetColor(highContrast_ ? Foreground() : D2D1::ColorF(1, 1, 1, 0.16f));
+        target_->DrawRoundedRectangle(D2D1::RoundedRect(card, 10.0f, 10.0f), brush_.Get(), 1.0f);
+
+        // Warning badge icon (!)
+        const auto pillRect = D2D1::RectF(card.left + 24.0f, card.top + 22.0f, card.left + 46.0f, card.top + 44.0f);
+        Fill(pillRect, D2D1::ColorF(0xF59E0B, 0.18f), 11.0f);
+        Text(L"!", pillRect, hintFormat_.Get(), D2D1::ColorF(0xFBBF24), DWRITE_TEXT_ALIGNMENT_CENTER);
+
+        // Header title
+        Text(L"Hotkey Conflict Detected",
+            D2D1::RectF(card.left + 54.0f, card.top + 20.0f, card.right - 24.0f, card.top + 46.0f),
+            resultFormat_.Get(), Foreground(), DWRITE_TEXT_ALIGNMENT_LEADING);
+
+        // Description text
+        Text(L"Your launcher hotkey is taken by another application. Takeoff cannot listen for this shortcut until changed.",
+            D2D1::RectF(card.left + 24.0f, card.top + 54.0f, card.right - 24.0f, card.top + 98.0f),
+            hintFormat_.Get(), Muted(), DWRITE_TEXT_ALIGNMENT_LEADING);
+
+        // Conflict preview box showing current hotkey badges
+        const float boxTop = card.top + 104.0f;
+        const auto badgeBox = D2D1::RectF(card.left + 24.0f, boxTop, card.right - 24.0f, boxTop + 40.0f);
+        Fill(badgeBox, highContrast_ ? SystemColor(COLOR_BTNFACE) : D2D1::ColorF(0, 0, 0, 0.25f), 6.0f);
+        brush_->SetColor(highContrast_ ? Foreground() : D2D1::ColorF(1, 1, 1, 0.08f));
+        target_->DrawRoundedRectangle(D2D1::RoundedRect(badgeBox, 6.0f, 6.0f), brush_.Get(), 0.75f);
+
+        Text(L"Currently assigned:",
+            D2D1::RectF(badgeBox.left + 14.0f, badgeBox.top, badgeBox.left + 150.0f, badgeBox.bottom),
+            hintFormat_.Get(), Muted(), DWRITE_TEXT_ALIGNMENT_LEADING);
+
+        const std::wstring hotkeyStr = quicklaunch::FormatBinding(settings_.launcherHotkey);
+        const float badgesW = KeyBadgesWidth(hotkeyStr);
+        DrawKeyBadges(hotkeyStr, badgeBox.right - 14.0f - badgesW, (badgeBox.top + badgeBox.bottom) / 2.0f);
+
+        // Dismiss button
+        const auto dismissRect = HotkeyWarningDismissButtonRect();
+        const bool dismissHover = mouseKnown_ && PointInHotkeyWarningDismiss(mouseX_, mouseY_);
+        Fill(dismissRect, highContrast_
+            ? (dismissHover ? SystemColor(COLOR_HIGHLIGHT) : SystemColor(COLOR_BTNFACE))
+            : dismissHover ? D2D1::ColorF(1, 1, 1, 0.12f) : D2D1::ColorF(1, 1, 1, 0.06f), 6.0f);
+        brush_->SetColor(highContrast_ ? Foreground() : D2D1::ColorF(1, 1, 1, 0.12f));
+        target_->DrawRoundedRectangle(D2D1::RoundedRect(dismissRect, 6.0f, 6.0f), brush_.Get(), 1.0f);
+        Text(L"Dismiss", dismissRect, hintFormat_.Get(),
+            highContrast_ && dismissHover ? SystemColor(COLOR_HIGHLIGHTTEXT) : (dismissHover ? Foreground() : Muted()),
+            DWRITE_TEXT_ALIGNMENT_CENTER);
+
+        // Change in Settings button (Primary action)
+        const auto settingsRect = HotkeyWarningSettingsButtonRect();
+        const bool settingsHover = mouseKnown_ && PointInHotkeyWarningSettings(mouseX_, mouseY_);
+        Fill(settingsRect, highContrast_
+            ? (settingsHover ? SystemColor(COLOR_HIGHLIGHT) : SystemColor(COLOR_BTNFACE))
+            : settingsHover ? D2D1::ColorF(0x3B82F6) : D2D1::ColorF(0x2563EB), 6.0f);
+        brush_->SetColor(highContrast_ ? Foreground() : D2D1::ColorF(1, 1, 1, 0.20f));
+        target_->DrawRoundedRectangle(D2D1::RoundedRect(settingsRect, 6.0f, 6.0f), brush_.Get(), 1.0f);
+        Text(L"Change in Settings", settingsRect, hintFormat_.Get(),
+            highContrast_ && settingsHover ? SystemColor(COLOR_HIGHLIGHTTEXT) : D2D1::ColorF(0xFFFFFF),
+            DWRITE_TEXT_ALIGNMENT_CENTER);
+    }
+
     void DrawFooter() {
         const float top = FooterTop();
         const float middle = width_ / 2;
@@ -1988,9 +2519,6 @@ private:
             Text(L"Actions", D2D1::RectF(middle, top, width_ - 30 - badges, height_),
                 hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted(),
                 DWRITE_TEXT_ALIGNMENT_TRAILING);
-        } else if (status_.empty() && hotkeyRegistered_ && !updateAvailable_) {
-            Text(L"Local search. No distractions.", D2D1::RectF(18, top, width_ - 18, height_),
-                hintFormat_.Get(), Muted(), DWRITE_TEXT_ALIGNMENT_CENTER);
         }
         if (updateAvailable_) {
             DrawUpdateIndicator();
@@ -2005,10 +2533,15 @@ private:
         Fill(rect, highContrast_ ? SystemColor(COLOR_WINDOW) : D2D1::ColorF(0x303033), 8);
         brush_->SetColor(highContrast_ ? Foreground() : D2D1::ColorF(1, 1, 1, 0.16f));
         target_->DrawRoundedRectangle(D2D1::RoundedRect(rect, 8, 8), brush_.Get());
-        Text(apps_[results_[selected_]].name,
+        const AppEntry& app = apps_[results_[selected_]];
+        Text(app.name,
             D2D1::RectF(rect.left + 12, rect.top + 2, rect.right - 12, rect.top + 30),
             hintFormat_.Get(), Muted());
-        const wchar_t* labels[] = {L"Open as Administrator", L"Copy app name", L"Copy launch path"};
+        const bool isFileOrFolder = (app.category == takeoff::AppCategory::File ||
+                                     app.category == takeoff::AppCategory::Folder);
+        const wchar_t* appLabels[] = {L"Open as Administrator", L"Copy app name", L"Copy launch path"};
+        const wchar_t* fileLabels[] = {L"Open", L"Open containing folder", L"Copy file path"};
+        const wchar_t** labels = isFileOrFolder ? fileLabels : appLabels;
         for (int i = 0; i < 3; ++i) {
             const float top = rect.top + 32 + i * 36;
             const auto row = D2D1::RectF(rect.left + 6, top, rect.right - 6, top + 34);
@@ -2070,7 +2603,7 @@ private:
 
         const float resetLeft = width_ - 136.0f, resetRight = width_ - 20.0f;
         const auto resetRect = D2D1::RectF(resetLeft, 10.0f, resetRight, 36.0f);
-        const bool resetSelected = (settingsSelected_ == 7);
+        const bool resetSelected = (settingsSelected_ == 8);
         Fill(resetRect, highContrast_
             ? (resetSelected ? SystemColor(COLOR_HIGHLIGHT) : SystemColor(COLOR_BTNFACE))
             : resetSelected ? D2D1::ColorF(1, 1, 1, 0.12f) : D2D1::ColorF(1, 1, 1, 0.05f), 5.0f);
@@ -2110,6 +2643,8 @@ private:
             L"Show Takeoff in the hidden icons area", {}, true, settings_.showTrayIcon);
         DrawSettingsRow(6, generalTop + 2 * kSettingsRowHeight, L"Check for updates",
             L"Check for updates when Takeoff starts", {}, true, settings_.checkForUpdates);
+        DrawSettingsRow(7, generalTop + 3 * kSettingsRowHeight, L"File search",
+            L"Search files and folders on your computer", {}, true, settings_.enableFileSearch);
 
         const float top = FooterTop();
         Fill(D2D1::RectF(1, top, width_ - 1, height_ - 1), D2D1::ColorF(0, 0, 0, 0.10f));
@@ -2143,6 +2678,9 @@ private:
                 DrawResults();
                 DrawFooter();
                 DrawActions();
+                if (ShouldShowHotkeyWarning()) {
+                    DrawHotkeyWarningModal();
+                }
             }
             brush_->SetColor(highContrast_ ? Foreground() : D2D1::ColorF(1, 1, 1, 0.24f));
             target_->DrawRoundedRectangle(
@@ -2174,6 +2712,7 @@ private:
     std::vector<AppEntry> apps_;
     std::vector<size_t> results_, recent_;
     std::vector<std::wstring> recentPaths_;
+    size_t baseAppsCount_ = 0;
     SearchInput input_;
     Settings settings_;
     Page page_ = Page::Launcher;
@@ -2186,6 +2725,7 @@ private:
     bool acrylic_ = false, nativeCorners_ = false, highContrast_ = false;
     bool backdropApplied_ = false, allowBlur_ = false;
     bool indexReady_ = false, caretVisible_ = true, hotkeyRegistered_ = false;
+    bool hotkeyWarningDismissed_ = false;
     bool trackingMouse_ = false, mouseKnown_ = false, dragging_ = false;
     bool actionsOpen_ = false, composing_ = false;
     bool actionsPositioned_ = false;
@@ -2200,4 +2740,9 @@ private:
     std::wstring releasesUrl_ = takeoff::kDefaultReleasesUrl;
     std::wstring apiHost_ = takeoff::kDefaultApiHost;
     std::wstring apiPath_ = takeoff::kDefaultApiPath;
+    std::thread indexWorkerThread_;
+    HANDLE indexStopEvent_ = nullptr;
+    HANDLE indexTriggerEvent_ = nullptr;
+    ULONG shellNotifyId_ = 0;
+    std::chrono::steady_clock::time_point lastIndexTime_{};
 };
