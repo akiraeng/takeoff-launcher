@@ -14,7 +14,7 @@
 
 namespace takeoff {
 
-inline constexpr wchar_t kAppVersion[] = L"1.0.1";
+inline constexpr wchar_t kAppVersion[] = L"1.0.2";
 inline constexpr wchar_t kDefaultReleasesUrl[] = L"https://github.com/akiraeng/takeoff-launcher/releases";
 inline constexpr wchar_t kDefaultApiHost[] = L"api.github.com";
 inline constexpr wchar_t kDefaultApiPath[] = L"/repos/akiraeng/takeoff-launcher/releases/latest";
