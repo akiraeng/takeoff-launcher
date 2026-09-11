@@ -1,5 +1,8 @@
 #pragma once
 
+#include <windows.h>
+#include <shellapi.h>
+
 #include <algorithm>
 #include <cstdint>
 #include <cwctype>
@@ -319,6 +322,39 @@ inline bool IsLaunchableExtension(std::wstring_view ext) {
     for (wchar_t ch : ext) lower.push_back(static_cast<wchar_t>(towlower(ch)));
     return lower == L".lnk" || lower == L".exe" ||
            lower == L".appref-ms" || lower == L".url";
+}
+
+inline std::wstring UrlEncode(std::wstring_view text) {
+    if (text.empty()) return L"";
+    const int utf8Len = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+        nullptr, 0, nullptr, nullptr);
+    if (utf8Len <= 0) return L"";
+    std::string utf8(utf8Len, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+        utf8.data(), utf8Len, nullptr, nullptr);
+    std::wstring encoded;
+    encoded.reserve(utf8.size() * 3);
+    for (unsigned char ch : utf8) {
+        if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+            (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.' || ch == '~') {
+            encoded.push_back(static_cast<wchar_t>(ch));
+        } else if (ch == ' ') {
+            encoded.push_back(L'+');
+        } else {
+            wchar_t hex[4];
+            swprintf_s(hex, L"%%%02X", ch);
+            encoded.append(hex);
+        }
+    }
+    return encoded;
+}
+
+inline bool OpenWebSearch(std::wstring_view query) {
+    if (query.empty()) return false;
+    const std::wstring url = L"https://www.google.com/search?q=" + UrlEncode(query);
+    const INT_PTR result = reinterpret_cast<INT_PTR>(
+        ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+    return result > 32;
 }
 
 } // namespace takeoff
