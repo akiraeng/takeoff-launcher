@@ -924,6 +924,7 @@ private:
         status_.clear();
         mouseKnown_ = false;
         hoverLockRow_ = -1;
+        webSearchCardHovered_ = false;
         UpdateResults();
         ResizeAndPosition();
         ShowWindow(hwnd_, SW_SHOWNORMAL);
@@ -1395,7 +1396,7 @@ private:
                 EnsureSettingsVisible(settingsSelected_);
                 InvalidateRect(hwnd_, nullptr, FALSE);
             } else if (key == VK_END) {
-                settingsSelected_ = 7;
+                settingsSelected_ = 8;
                 EnsureSettingsVisible(settingsSelected_);
                 InvalidateRect(hwnd_, nullptr, FALSE);
             } else if (key == VK_PRIOR) {
@@ -1454,7 +1455,7 @@ private:
         }
         switch (key) {
         case VK_RETURN:
-            if (results_.empty() && !input_.text.empty()) {
+            if (results_.empty() && !takeoff::Normalize(input_.text).empty()) {
                 if (!settings_.enableWebSearch) {
                     status_ = L"No results. Web search is disabled in settings.";
                     ResetCaret();
@@ -1464,13 +1465,7 @@ private:
                 const bool allReady = indexReady_ &&
                     (!settings_.enableFileSearch || takeoff::FileIndex::Instance().IsReady());
                 if (allReady) {
-                    if (takeoff::OpenWebSearch(input_.text)) {
-                        Hide();
-                    } else {
-                        status_ = L"Could not open your browser. Try another query.";
-                        ResetCaret();
-                        InvalidateRect(hwnd_, nullptr, FALSE);
-                    }
+                    OpenWebSearch(input_.text);
                 } else {
                     status_ = L"Still indexing\u2009—\u2009try again in a moment.";
                     ResetCaret();
@@ -1626,6 +1621,24 @@ private:
         }
     }
 
+    bool OpenWebSearch(std::wstring_view query) {
+        if (query.empty()) return false;
+        const std::wstring url = L"https://www.google.com/search?q=" + takeoff::UrlEncode(query);
+        Hide();
+        const INT_PTR result = reinterpret_cast<INT_PTR>(
+            ShellExecuteW(hwnd_, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+        if (result <= 32) {
+            ShowWindow(hwnd_, SW_SHOWNORMAL);
+            SetForegroundWindow(hwnd_);
+            SetFocus(hwnd_);
+            status_ = L"Could not open your browser. Try another query.";
+            ResetCaret();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return false;
+        }
+        return true;
+    }
+
     void ToggleActions() {
         if (!HasResult()) return;
         actionsOpen_ = !actionsOpen_;
@@ -1723,7 +1736,7 @@ private:
             }
             const float resetLeft = width_ - 136.0f, resetRight = width_ - 20.0f;
             if (y >= 10.0f && y <= 36.0f && x >= resetLeft && x <= resetRight) {
-                settingsSelected_ = 8;
+                settingsSelected_ = 9;
                 ResetToDefaults();
                 return;
             }
@@ -1799,6 +1812,8 @@ private:
         } else if (const int result = ResultAtPoint(x, y); result >= 0) {
             selected_ = result;
             LaunchSelected(false);
+        } else if (PointInWebSearchCard(x, y)) {
+            OpenWebSearch(input_.text);
         }
     }
 
@@ -1853,7 +1868,7 @@ private:
             const float resetLeft = width_ - 136.0f, resetRight = width_ - 20.0f;
             int row = -1;
             if (y >= 10.0f && y <= 36.0f && x >= resetLeft && x <= resetRight) {
-                row = 8;
+                row = 9;
             } else if (y >= kSettingsHeaderHeight && y < FooterTop() && x < width_ - 14.0f) {
                 const float contentY = y + settingsScroll_;
                 constexpr float keyboardTop = 68.0f;
@@ -1878,6 +1893,13 @@ private:
             const bool hovered = PointInUpdateIndicator(x, y);
             if (hovered != updateHovered_) {
                 updateHovered_ = hovered;
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+        }
+        if (page_ == Page::Launcher && results_.empty() && settings_.enableWebSearch) {
+            const bool hovered = PointInWebSearchCard(x, y);
+            if (hovered != webSearchCardHovered_) {
+                webSearchCardHovered_ = hovered;
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
         }
@@ -2396,16 +2418,57 @@ private:
             hintFormat_.Get(), Muted(), DWRITE_TEXT_ALIGNMENT_TRAILING);
 
         if (results_.empty()) {
-            const float center = (ResultsTop() + FooterTop()) / 2;
-            SearchGlyph(width_ / 2 - 3, center - 48, 12);
-            Text(!indexReady_ ? L"Finding your applications\u2026" : input_.text.empty()
-                    ? L"No applications found" : L"No matching applications",
-                D2D1::RectF(32, center - 13, width_ - 32, center + 17), resultFormat_.Get(),
-                Foreground(), DWRITE_TEXT_ALIGNMENT_CENTER);
-            Text(!indexReady_ ? L"Your Start Menu and installed apps will appear here." : input_.text.empty()
-                    ? L"Apps from your Start Menu appear here." : L"Try a shorter name, or press Esc to clear your search.",
-                D2D1::RectF(32, center + 20, width_ - 32, center + 48), hintFormat_.Get(),
-                Muted(), DWRITE_TEXT_ALIGNMENT_CENTER);
+            const float center = (ResultsTop() + FooterTop()) / 2.0f;
+            const bool hasQuery = !input_.text.empty();
+            const bool hasSearchableText = !takeoff::Normalize(input_.text).empty();
+
+            if (hasSearchableText && settings_.enableWebSearch) {
+                SearchGlyph(width_ / 2.0f - 3.0f, center - 62.0f, 12.0f);
+                Text(!indexReady_ ? L"Finding your applications\u2026" : L"No matching applications",
+                    D2D1::RectF(32.0f, center - 42.0f, width_ - 32.0f, center - 14.0f), resultFormat_.Get(),
+                    Foreground(), DWRITE_TEXT_ALIGNMENT_CENTER);
+
+                const auto cardRect = WebSearchCardRect();
+                const bool hovering = mouseKnown_ && PointInWebSearchCard(mouseX_, mouseY_);
+
+                if (highContrast_) {
+                    Fill(cardRect, hovering ? SystemColor(COLOR_HIGHLIGHT) : SystemColor(COLOR_BTNFACE), 8.0f);
+                    brush_->SetColor(hovering ? SystemColor(COLOR_HIGHLIGHTTEXT) : Foreground());
+                    target_->DrawRoundedRectangle(D2D1::RoundedRect(cardRect, 8.0f, 8.0f), brush_.Get(), 1.0f);
+                } else {
+                    Fill(cardRect, hovering ? D2D1::ColorF(0x6EA8FE, 0.16f) : D2D1::ColorF(1, 1, 1, 0.055f), 8.0f);
+                    brush_->SetColor(hovering ? D2D1::ColorF(0x6EA8FE, 0.55f) : D2D1::ColorF(1, 1, 1, 0.12f));
+                    target_->DrawRoundedRectangle(D2D1::RoundedRect(cardRect, 8.0f, 8.0f), brush_.Get(), 1.0f);
+                }
+
+                SearchGlyph(cardRect.left + 22.0f, (cardRect.top + cardRect.bottom) / 2.0f - 1.0f, 6.0f);
+
+                const std::wstring searchPrompt = L"Search Google for \u201C" + input_.text + L"\u201D";
+                const auto promptRect = D2D1::RectF(cardRect.left + 38.0f, cardRect.top, cardRect.right - 54.0f, cardRect.bottom);
+                const auto textColor = highContrast_ && hovering ? SystemColor(COLOR_HIGHLIGHTTEXT) : Foreground();
+                Text(searchPrompt, promptRect, resultFormat_.Get(), textColor);
+
+                Key(L"↵", cardRect.right - 44.0f, (cardRect.top + cardRect.bottom) / 2.0f - 11.0f, 30.0f);
+
+                Text(L"Press Enter or click to search in your browser",
+                    D2D1::RectF(32.0f, cardRect.bottom + 12.0f, width_ - 32.0f, cardRect.bottom + 34.0f),
+                    hintFormat_.Get(), Muted(), DWRITE_TEXT_ALIGNMENT_CENTER);
+            } else {
+                SearchGlyph(width_ / 2.0f - 3.0f, center - 48.0f, 12.0f);
+                Text(!indexReady_ ? L"Finding your applications\u2026" : !hasQuery
+                        ? L"No applications found" : L"No matching applications",
+                    D2D1::RectF(32.0f, center - 13.0f, width_ - 32.0f, center + 17.0f), resultFormat_.Get(),
+                    Foreground(), DWRITE_TEXT_ALIGNMENT_CENTER);
+                const std::wstring hint = !indexReady_
+                    ? L"Your Start Menu and installed apps will appear here."
+                    : !hasQuery
+                        ? L"Apps from your Start Menu appear here."
+                        : hasSearchableText && !settings_.enableWebSearch
+                            ? L"Web search is disabled in Settings. Press Esc to clear."
+                            : L"Try a shorter name, or press Esc to clear your search.";
+                Text(hint, D2D1::RectF(32.0f, center + 20.0f, width_ - 32.0f, center + 48.0f), hintFormat_.Get(),
+                    Muted(), DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
             return;
         }
         const int end = (std::min)(firstVisible_ + visibleRows_, static_cast<int>(results_.size()));
@@ -2468,6 +2531,22 @@ private:
             Fill(D2D1::RectF(width_ - 6, ResultsTop() + offset, width_ - 3, ResultsTop() + offset + thumb),
                 D2D1::ColorF(1, 1, 1, 0.22f), 1.5f);
         }
+    }
+
+    D2D1_RECT_F WebSearchCardRect() const {
+        const float center = (ResultsTop() + FooterTop()) / 2.0f;
+        constexpr float cardHeight = 44.0f;
+        const float cardWidth = (std::min)(width_ - 64.0f, 460.0f);
+        const float left = (width_ - cardWidth) / 2.0f;
+        const float top = center + 6.0f;
+        return D2D1::RectF(left, top, left + cardWidth, top + cardHeight);
+    }
+
+    bool PointInWebSearchCard(float x, float y) const {
+        if (page_ != Page::Launcher || !results_.empty() || !settings_.enableWebSearch ||
+            takeoff::Normalize(input_.text).empty()) return false;
+        const auto rect = WebSearchCardRect();
+        return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
     }
 
     D2D1_RECT_F UpdateIndicatorRect() const {
@@ -2659,6 +2738,11 @@ private:
             Text(L"Actions", D2D1::RectF(middle, top, width_ - 30 - badges, height_),
                 hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted(),
                 DWRITE_TEXT_ALIGNMENT_TRAILING);
+        }
+        if (results_.empty() && !takeoff::Normalize(input_.text).empty() && settings_.enableWebSearch) {
+            Text(L"Search Google", D2D1::RectF(middle, top, width_ - 58, height_),
+                hintFormat_.Get(), Muted(), DWRITE_TEXT_ALIGNMENT_TRAILING);
+            Key(L"↵", width_ - 48, top + (kFooterHeight - 22) / 2, 28);
         }
         if (updateAvailable_) {
             DrawUpdateIndicator();
@@ -2911,6 +2995,7 @@ private:
     float actionsX_ = 0, actionsY_ = 0;
     bool updateAvailable_ = false;
     bool updateHovered_ = false;
+    bool webSearchCardHovered_ = false;
     std::thread updateThread_;
     uint64_t lastUpdateCheck_ = 0;
     std::wstring releasesUrl_ = takeoff::kDefaultReleasesUrl;

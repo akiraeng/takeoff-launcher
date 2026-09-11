@@ -366,11 +366,27 @@ int main() {
     int fileScore = ScoreFile(L"code txt", L"code");
     Check(appScore > fileScore, "app 'Visual Studio Code' strictly beats file 'code.txt'");
 
-    // 3. Settings enableFileSearch default and toggle
+    // 3. Settings enableFileSearch and enableWebSearch defaults and toggles
     Settings defaultSettings;
     Check(defaultSettings.enableFileSearch == true, "file search enabled by default in settings");
     defaultSettings.enableFileSearch = false;
     Check(!defaultSettings.enableFileSearch, "file search toggle can be disabled");
+    Check(defaultSettings.enableWebSearch == true, "web search enabled by default in settings");
+    defaultSettings.enableWebSearch = false;
+    Check(!defaultSettings.enableWebSearch, "web search toggle can be disabled");
+
+    // UrlEncode tests
+    Check(UrlEncode(L"").empty(), "UrlEncode empty string");
+    Check(UrlEncode(L"takeoff") == L"takeoff", "UrlEncode plain text");
+    Check(UrlEncode(L"hello world") == L"hello+world", "UrlEncode spaces to plus");
+    Check(UrlEncode(L"c++ & c#") == L"c%2B%2B+%26+c%23", "UrlEncode reserved characters");
+    Check(UrlEncode(L"test~_.-") == L"test~_.-", "UrlEncode unreserved characters preserved");
+    Check(UrlEncode(L"caf\u00e9") == L"caf%C3%A9", "UrlEncode UTF-8 multi-byte");
+
+    // Web search normalization tests
+    Check(Normalize(L"   ").empty(), "whitespace query normalizes to empty");
+    Check(Normalize(L"\t \r\n ").empty(), "whitespace query normalizes to empty");
+    Check(!Normalize(L"google search").empty(), "valid search query normalizes to non-empty");
 
     // 4. Zero-query app-only invariant:
     // When input query is empty, FileIndex returns 0 results.

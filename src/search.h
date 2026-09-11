@@ -1,7 +1,12 @@
 #pragma once
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
-#include <shellapi.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -349,13 +354,6 @@ inline std::wstring UrlEncode(std::wstring_view text) {
     return encoded;
 }
 
-inline bool OpenWebSearch(std::wstring_view query) {
-    if (query.empty()) return false;
-    const std::wstring url = L"https://www.google.com/search?q=" + UrlEncode(query);
-    const INT_PTR result = reinterpret_cast<INT_PTR>(
-        ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
-    return result > 32;
-}
 
 } // namespace takeoff
 
