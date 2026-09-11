@@ -9,6 +9,7 @@ add_executable(${target} WIN32
     src/search.h
     src/settings.h
     src/updates.h
+    src/calculator.h
     src/Takeoff.manifest
     src/Takeoff.rc
 )

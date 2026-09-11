@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Built-in Calculator**: Real-time evaluation of mathematical expressions directly within the launcher search bar (e.g. `125 * 8`, `(10 + 20) * 3`, `sqrt(144)`, `2^10`, `10 % 3`, `200 * 15%`).
+- **Instant Result Display & Copy**: Top-ranked calculation result displayed with dedicated calculator badge, immediate `Enter` shortcut to copy the result and close, and `Ctrl+C` to copy without closing.
+- **Calculator Actions**: Context actions (`Ctrl+K`) for copying the numeric result, copying the full calculation (`expression = result`), or opening Windows Calculator.
+
 ## [1.0.2] - 2026-09-09
 
 ### Added

@@ -21,7 +21,8 @@ enum class AppCategory : uint8_t {
     Application,
     System,
     File,
-    Folder
+    Folder,
+    Calculator
 };
 
 inline std::wstring Normalize(std::wstring_view value) {

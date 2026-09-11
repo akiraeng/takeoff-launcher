@@ -31,6 +31,7 @@
 #include "settings.h"
 #include "updates.h"
 #include "file_index.h"
+#include "calculator.h"
 
 namespace fs = std::filesystem;
 using Microsoft::WRL::ComPtr;

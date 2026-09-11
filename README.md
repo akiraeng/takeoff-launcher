@@ -36,6 +36,7 @@
   dev man  → Device Manager
   ```
 * **System Tools Included** — Instantly launch Control Panel applets, Windows Settings, Device Manager, and Services alongside desktop apps.
+* **Built-in Calculator** — Instantly evaluate mathematical expressions (e.g. `125 * 8`, `sqrt(144)`, `2^10`, `(10 + 20) * 3`). Press `Enter` to copy the result to the clipboard and close, or `Ctrl+C` to copy directly.
 * **Keyboard-First** — Launch, elevate to admin (`Ctrl+Enter`), and trigger quick-launch slots (`Alt+1`–`8`) without touching your mouse.
 * **Privacy First** — Zero telemetry, zero analytics, and zero background services. Search history is never written to disk.
 
@@ -46,10 +47,11 @@
 | Shortcut | Action |
 | --- | --- |
 | `Alt+Space` | Open or dismiss Takeoff |
-| `Enter` | Launch selected application |
+| `Enter` | Launch application or copy calculation result |
 | `Ctrl+Enter` | Run as administrator |
 | `Alt+1` ... `Alt+8` | Quick-launch visible result |
-| `Ctrl+K` | Open actions menu (copy path, admin, etc.) |
+| `Ctrl+C` | Copy selected text or calculation result |
+| `Ctrl+K` | Open actions menu (copy path, copy calculation, admin, etc.) |
 | `Escape` | Clear query or close |
 
 *Hotkeys can be customized anytime from the in-app Settings (gear icon).*

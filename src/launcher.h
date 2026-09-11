@@ -13,7 +13,8 @@ public:
         }
         if (!CreateFormat(19.0f, DWRITE_FONT_WEIGHT_NORMAL, searchFormat_) ||
             !CreateFormat(14.0f, DWRITE_FONT_WEIGHT_MEDIUM, resultFormat_) ||
-            !CreateFormat(12.0f, DWRITE_FONT_WEIGHT_NORMAL, hintFormat_)) return false;
+            !CreateFormat(12.0f, DWRITE_FONT_WEIGHT_NORMAL, hintFormat_) ||
+            !CreateFormat(22.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, calcResultFormat_)) return false;
 
         WNDCLASSEXW windowClass{sizeof(windowClass)};
         windowClass.style = CS_DBLCLKS;
@@ -77,6 +78,7 @@ private:
     static constexpr float kSearchHeight = 64.0f;
     static constexpr float kSectionHeight = 32.0f;
     static constexpr float kRowHeight = 42.0f;
+    static constexpr float kCalcRowHeight = 58.0f;
     static constexpr float kFooterHeight = 42.0f;
     static constexpr float kSettingsHeaderHeight = 46.0f;
     static constexpr float kSettingsRowHeight = 47.0f;
@@ -440,6 +442,15 @@ private:
     int ToPixel(float value) const { return static_cast<int>(std::lround(value * dpi_ / 96.0f)); }
     float FooterTop() const { return height_ - kFooterHeight; }
     float ResultsTop() const { return kSearchHeight + kSectionHeight; }
+    float RowHeight(int resultIndex) const {
+        if (resultIndex >= 0 && resultIndex < static_cast<int>(results_.size())) {
+            const size_t appIdx = results_[resultIndex];
+            if (appIdx < apps_.size() && apps_[appIdx].category == takeoff::AppCategory::Calculator) {
+                return kCalcRowHeight;
+            }
+        }
+        return kRowHeight;
+    }
 
     void RegisterShortcut() {
         if (hotkeyRegistered_) {
@@ -1102,6 +1113,21 @@ private:
             });
             for (const auto& item : ranked) results_.push_back(item.appIndex);
         }
+        if (!input_.text.empty()) {
+            auto calc = takeoff::EvaluateExpression(input_.text);
+            if (calc.has_value()) {
+                AppEntry entry;
+                entry.name = calc->formattedResult;
+                entry.path = calc->rawResult;
+                entry.normalizedName = Normalize(entry.name);
+                entry.category = takeoff::AppCategory::Calculator;
+                entry.parameters = calc->expression;
+                entry.iconPath = L"calc.exe";
+                const size_t calcIdx = apps_.size();
+                apps_.push_back(std::move(entry));
+                results_.insert(results_.begin(), calcIdx);
+            }
+        }
         selected_ = std::clamp(selected_, 0, (std::max)(0, static_cast<int>(results_.size()) - 1));
         EnsureVisible();
         PrepareVisibleIcons();
@@ -1444,7 +1470,16 @@ private:
         if (control) {
             switch (key) {
             case 'A': input_.SelectAll(); ResetCaret(); return 0;
-            case 'C': CopySelection(false); return 0;
+            case 'C':
+                if (input_.HasSelection()) {
+                    CopySelection(false);
+                } else if (HasResult() && apps_[results_[selected_]].category == takeoff::AppCategory::Calculator) {
+                    const bool copied = CopyText(apps_[results_[selected_]].path);
+                    status_ = copied ? L"Result copied to clipboard" : L"Clipboard is busy. Try again.";
+                    ResetCaret();
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                }
+                return 0;
             case 'X': CopySelection(true); return 0;
             case 'V': Paste(); return 0;
             case 'L': input_.SelectAll(); ResetCaret(); return 0;
@@ -1570,6 +1605,11 @@ private:
         if (!HasResult()) return;
         const size_t index = results_[selected_];
         const AppEntry& app = apps_[index];
+        if (app.category == takeoff::AppCategory::Calculator) {
+            CopyText(app.path);
+            Hide();
+            return;
+        }
         const std::wstring& path = app.path;
         Hide();
         const bool isProtocol = path.rfind(L"ms-settings:", 0) == 0 || path.rfind(L"shell:", 0) == 0;
@@ -1666,6 +1706,22 @@ private:
         actionsOpen_ = false;
         actionsPositioned_ = false;
         const AppEntry& app = apps_[results_[selected_]];
+        if (app.category == takeoff::AppCategory::Calculator) {
+            if (action == 0) {
+                CopyText(app.path);
+                Hide();
+                return;
+            } else if (action == 1) {
+                const std::wstring calc = app.parameters + L" = " + app.name;
+                CopyText(calc);
+                Hide();
+                return;
+            } else if (action == 2) {
+                ShellExecuteW(nullptr, L"open", L"calc.exe", nullptr, nullptr, SW_SHOWNORMAL);
+                Hide();
+                return;
+            }
+        }
         const bool isFileOrFolder = (app.category == takeoff::AppCategory::File ||
                                      app.category == takeoff::AppCategory::Folder);
         if (isFileOrFolder) {
@@ -1713,9 +1769,31 @@ private:
     int ResultAtPoint(float x, float y) const {
         if (page_ != Page::Launcher) return -1;
         if (x < 8 || x > width_ - 12 || y < ResultsTop() || y >= FooterTop() - 8) return -1;
-        const int row = static_cast<int>((y - ResultsTop()) / kRowHeight);
-        const int index = firstVisible_ + row;
-        return row < visibleRows_ && index < static_cast<int>(results_.size()) ? index : -1;
+        float top = ResultsTop();
+        for (int i = firstVisible_; i < static_cast<int>(results_.size()); ++i) {
+            const float h = RowHeight(i);
+            if (top + h > FooterTop()) break;
+            if (y >= top && y < top + h) {
+                return i;
+            }
+            top += h;
+        }
+        return -1;
+    }
+
+    int ResultSlotAtPoint(float x, float y) const {
+        if (page_ != Page::Launcher) return -1;
+        if (x < 8 || x > width_ - 12 || y < ResultsTop() || y >= FooterTop() - 8) return -1;
+        float top = ResultsTop();
+        for (int i = firstVisible_; i < static_cast<int>(results_.size()); ++i) {
+            const float h = RowHeight(i);
+            if (top + h > FooterTop()) break;
+            if (y >= top && y < top + h) {
+                return i - firstVisible_;
+            }
+            top += h;
+        }
+        return -1;
     }
 
     void HandleClick(float x, float y) {
@@ -2168,7 +2246,7 @@ private:
         if (mouseKnown_ && page_ == Page::Launcher &&
             mouseY_ >= ResultsTop() && mouseY_ < FooterTop() - 8 &&
             mouseX_ >= 8 && mouseX_ <= width_ - 12) {
-            hoverLockRow_ = static_cast<int>((mouseY_ - ResultsTop()) / kRowHeight);
+            hoverLockRow_ = ResultSlotAtPoint(mouseX_, mouseY_);
         } else {
             hoverLockRow_ = -1;
         }
@@ -2473,57 +2551,86 @@ private:
             }
             return;
         }
-        const int end = (std::min)(firstVisible_ + visibleRows_, static_cast<int>(results_.size()));
-        for (int i = firstVisible_; i < end; ++i) {
-            const float top = ResultsTop() + (i - firstVisible_) * kRowHeight;
+        float currentTop = ResultsTop();
+        for (int i = firstVisible_; i < static_cast<int>(results_.size()); ++i) {
+            const float rowHeight = RowHeight(i);
+            if (currentTop + rowHeight > FooterTop() - 4.0f) {
+                break;
+            }
+            const float top = currentTop;
+            currentTop += rowHeight;
+
             const bool selected = i == selected_;
-            const auto row = D2D1::RectF(8, top, width_ - 12, top + kRowHeight - 2);
+            const auto row = D2D1::RectF(8, top, width_ - 12, top + rowHeight - 2);
             if (selected) {
                 Fill(row, highContrast_ ? SystemColor(COLOR_HIGHLIGHT) : D2D1::ColorF(1, 1, 1, 0.10f), 7);
                 brush_->SetColor(D2D1::ColorF(1, 1, 1, 0.035f));
                 target_->DrawRoundedRectangle(D2D1::RoundedRect(row, 7, 7), brush_.Get(), 1);
             }
             const AppEntry& app = apps_[results_[i]];
-            const std::wstring& lookupPath = !app.iconPath.empty() ? app.iconPath : app.path;
-            const auto iconRect = D2D1::RectF(20, top + 7, 46, top + 33);
-            auto found = iconCache_.find(lookupPath);
-            ID2D1Bitmap* bitmap = nullptr;
-            if (found != iconCache_.end()) {
-                IconEntry& entry = found->second;
-                if (!entry.bitmap && entry.source) target_->CreateBitmapFromWicBitmap(entry.source.Get(), &entry.bitmap);
-                bitmap = entry.bitmap.Get();
-            }
             const auto textColor = highContrast_ && selected ? SystemColor(COLOR_HIGHLIGHTTEXT) : Foreground();
-            if (bitmap) {
-                target_->DrawBitmap(bitmap, iconRect, 1, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-            } else {
-                Fill(iconRect, D2D1::ColorF(0x555B71), 6);
-                Text(app.name.substr(0, 1), iconRect, resultFormat_.Get(), D2D1::ColorF(0xFFFFFF),
-                    DWRITE_TEXT_ALIGNMENT_CENTER);
-                if (app.category == takeoff::AppCategory::Folder) {
-                    Fill(iconRect, D2D1::ColorF(0xD97706), 6);
-                    Text(L"F", iconRect, resultFormat_.Get(), D2D1::ColorF(0xFFFFFF),
-                        DWRITE_TEXT_ALIGNMENT_CENTER);
-                } else if (app.category == takeoff::AppCategory::File) {
-                    Fill(iconRect, D2D1::ColorF(0x4B5563), 6);
-                    Text(L"F", iconRect, resultFormat_.Get(), D2D1::ColorF(0xFFFFFF),
-                        DWRITE_TEXT_ALIGNMENT_CENTER);
-                } else {
-                    Fill(iconRect, D2D1::ColorF(0x555B71), 6);
-                    Text(app.name.substr(0, 1), iconRect, resultFormat_.Get(), D2D1::ColorF(0xFFFFFF),
-                        DWRITE_TEXT_ALIGNMENT_CENTER);
+
+            if (app.category == takeoff::AppCategory::Calculator) {
+                const auto iconRect = D2D1::RectF(20, top + (rowHeight - 32) / 2, 52, top + (rowHeight + 32) / 2);
+                Fill(iconRect, D2D1::ColorF(0x2563EB), 7);
+                Text(L"=", iconRect, searchFormat_.Get(), D2D1::ColorF(0xFFFFFF), DWRITE_TEXT_ALIGNMENT_CENTER);
+
+                const float textLeft = 64.0f;
+                const float rightAnswerWidth = 320.0f;
+                const float leftTextRight = (std::max)(textLeft + 100.0f, width_ - rightAnswerWidth - 16.0f);
+
+                Text(L"Calculation", D2D1::RectF(textLeft, top + 8, leftTextRight, top + 26),
+                    resultFormat_.Get(), textColor);
+
+                std::wstring exprDisplay = app.parameters;
+                if (!exprDisplay.empty() && exprDisplay.back() != L'=') {
+                    exprDisplay += L" =";
                 }
+                Text(exprDisplay, D2D1::RectF(textLeft, top + 28, leftTextRight, top + 48),
+                    hintFormat_.Get(), highContrast_ && selected ? textColor : Muted());
+
+                const float answerRight = width_ - 24.0f;
+                const float answerLeft = (std::max)(leftTextRight + 8.0f, width_ - rightAnswerWidth);
+                Text(app.name, D2D1::RectF(answerLeft, top, answerRight, top + rowHeight - 2),
+                    calcResultFormat_.Get(), textColor, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            } else {
+                const std::wstring& lookupPath = !app.iconPath.empty() ? app.iconPath : app.path;
+                const auto iconRect = D2D1::RectF(20, top + 7, 46, top + 33);
+                auto found = iconCache_.find(lookupPath);
+                ID2D1Bitmap* bitmap = nullptr;
+                if (found != iconCache_.end()) {
+                    IconEntry& entry = found->second;
+                    if (!entry.bitmap && entry.source) target_->CreateBitmapFromWicBitmap(entry.source.Get(), &entry.bitmap);
+                    bitmap = entry.bitmap.Get();
+                }
+                if (bitmap) {
+                    target_->DrawBitmap(bitmap, iconRect, 1, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                } else {
+                    if (app.category == takeoff::AppCategory::Folder) {
+                        Fill(iconRect, D2D1::ColorF(0xD97706), 6);
+                        Text(L"F", iconRect, resultFormat_.Get(), D2D1::ColorF(0xFFFFFF),
+                            DWRITE_TEXT_ALIGNMENT_CENTER);
+                    } else if (app.category == takeoff::AppCategory::File) {
+                        Fill(iconRect, D2D1::ColorF(0x4B5563), 6);
+                        Text(L"F", iconRect, resultFormat_.Get(), D2D1::ColorF(0xFFFFFF),
+                            DWRITE_TEXT_ALIGNMENT_CENTER);
+                    } else {
+                        Fill(iconRect, D2D1::ColorF(0x555B71), 6);
+                        Text(app.name.substr(0, 1), iconRect, resultFormat_.Get(), D2D1::ColorF(0xFFFFFF),
+                            DWRITE_TEXT_ALIGNMENT_CENTER);
+                    }
+                }
+                Text(app.name, D2D1::RectF(60, top, width_ - 158, top + 40), resultFormat_.Get(), textColor);
+                const bool recent = input_.text.empty() &&
+                    std::find(recent_.begin(), recent_.end(), results_[i]) != recent_.end();
+                const wchar_t* categoryLabel = recent ? L"Recent"
+                    : (app.category == takeoff::AppCategory::System ? L"System"
+                    : (app.category == takeoff::AppCategory::Folder ? L"Folder"
+                    : (app.category == takeoff::AppCategory::File ? L"File" : L"Application")));
+                Text(categoryLabel,
+                    D2D1::RectF(width_ - 154, top, width_ - 28, top + 40), hintFormat_.Get(),
+                    highContrast_ && selected ? textColor : Muted(), DWRITE_TEXT_ALIGNMENT_TRAILING);
             }
-            Text(app.name, D2D1::RectF(60, top, width_ - 158, top + 40), resultFormat_.Get(), textColor);
-            const bool recent = input_.text.empty() &&
-                std::find(recent_.begin(), recent_.end(), results_[i]) != recent_.end();
-            const wchar_t* categoryLabel = recent ? L"Recent"
-                : (app.category == takeoff::AppCategory::System ? L"System"
-                : (app.category == takeoff::AppCategory::Folder ? L"Folder"
-                : (app.category == takeoff::AppCategory::File ? L"File" : L"Application")));
-            Text(categoryLabel,
-                D2D1::RectF(width_ - 154, top, width_ - 28, top + 40), hintFormat_.Get(),
-                highContrast_ && selected ? textColor : Muted(), DWRITE_TEXT_ALIGNMENT_TRAILING);
         }
         if (results_.size() > static_cast<size_t>(visibleRows_)) {
             const float track = visibleRows_ * kRowHeight - 4;
@@ -2718,18 +2825,25 @@ private:
             Text(message, D2D1::RectF(12, top, middle - 12, height_), hintFormat_.Get(), Muted(),
                 DWRITE_TEXT_ALIGNMENT_CENTER);
         } else if (HasResult()) {
-            Text(L"Open as Administrator", D2D1::RectF(24, top, 156, height_),
-                hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
-            if (settings_.administratorHotkey.disabled) {
-                Text(L"Disabled", D2D1::RectF(160, top, 286, height_), hintFormat_.Get(), Muted(),
-                    DWRITE_TEXT_ALIGNMENT_CENTER);
+            const AppEntry& app = apps_[results_[selected_]];
+            if (app.category == takeoff::AppCategory::Calculator) {
+                Text(L"Copy result", D2D1::RectF(24, top, 156, height_),
+                    hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
+                Key(L"\u21B5", 96, top + (kFooterHeight - 22) / 2, 24);
             } else {
-                const std::wstring adminLabel =
-                    quicklaunch::FormatAdminBinding(settings_.administratorHotkey);
-                float x = 160 + DrawKeyBadges(adminLabel, 160, top + kFooterHeight / 2);
-                Text(L"/", D2D1::RectF(x + 2, top, x + 16, height_), hintFormat_.Get(), Muted(),
-                    DWRITE_TEXT_ALIGNMENT_CENTER);
-                MouseKey(x + 20, top + 10);
+                Text(L"Open as Administrator", D2D1::RectF(24, top, 156, height_),
+                    hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
+                if (settings_.administratorHotkey.disabled) {
+                    Text(L"Disabled", D2D1::RectF(160, top, 286, height_), hintFormat_.Get(), Muted(),
+                        DWRITE_TEXT_ALIGNMENT_CENTER);
+                } else {
+                    const std::wstring adminLabel =
+                        quicklaunch::FormatAdminBinding(settings_.administratorHotkey);
+                    float x = 160 + DrawKeyBadges(adminLabel, 160, top + kFooterHeight / 2);
+                    Text(L"/", D2D1::RectF(x + 2, top, x + 16, height_), hintFormat_.Get(), Muted(),
+                        DWRITE_TEXT_ALIGNMENT_CENTER);
+                    MouseKey(x + 20, top + 10);
+                }
             }
         }
         if (HasResult()) {
@@ -2763,11 +2877,13 @@ private:
         Text(app.name,
             D2D1::RectF(rect.left + 12, rect.top + 2, rect.right - 12, rect.top + 30),
             hintFormat_.Get(), Muted());
+        const bool isCalc = (app.category == takeoff::AppCategory::Calculator);
         const bool isFileOrFolder = (app.category == takeoff::AppCategory::File ||
                                      app.category == takeoff::AppCategory::Folder);
         const wchar_t* appLabels[] = {L"Open as Administrator", L"Copy app name", L"Copy launch path"};
         const wchar_t* fileLabels[] = {L"Open", L"Open containing folder", L"Copy file path"};
-        const wchar_t** labels = isFileOrFolder ? fileLabels : appLabels;
+        const wchar_t* calcLabels[] = {L"Copy result", L"Copy calculation", L"Open Windows Calculator"};
+        const wchar_t** labels = isCalc ? calcLabels : (isFileOrFolder ? fileLabels : appLabels);
         for (int i = 0; i < 3; ++i) {
             const float top = rect.top + 32 + i * 36;
             const auto row = D2D1::RectF(rect.left + 6, top, rect.right - 6, top + 34);
@@ -2962,7 +3078,7 @@ private:
     ComPtr<IDWriteFactory> writeFactory_;
     ComPtr<ID2D1HwndRenderTarget> target_;
     ComPtr<ID2D1SolidColorBrush> brush_;
-    ComPtr<IDWriteTextFormat> searchFormat_, resultFormat_, hintFormat_;
+    ComPtr<IDWriteTextFormat> searchFormat_, resultFormat_, hintFormat_, calcResultFormat_;
     std::unordered_map<std::wstring, IconEntry> iconCache_;
     std::thread iconThread_;
     std::mutex iconMutex_;

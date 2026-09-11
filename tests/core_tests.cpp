@@ -2,6 +2,7 @@
 #include "../src/settings.h"
 #include "../src/updates.h"
 #include "../src/file_index.h"
+#include "../src/calculator.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -484,5 +485,204 @@ int main() {
     constexpr float viewportHeight = footerTop - kSettingsHeaderH; // 394.0f
     Check(viewportHeight == 394.0f, "settings viewport height is 394px");
 
-    std::cout << "All search, text editing, hotkey, and settings scroll checks passed in " << elapsed << "ms.\n";
+    // --- Calculator Tests ---
+    // AppCategory::Calculator distinction
+    Check(AppCategory::Calculator != AppCategory::Application, "Calculator category is distinct");
+    Check(AppCategory::Calculator != AppCategory::System, "Calculator distinct from System");
+    Check(AppCategory::Calculator != AppCategory::File, "Calculator distinct from File");
+
+    // 1. Basic arithmetic
+    auto r1 = EvaluateExpression(L"125 * 8");
+    Check(r1.has_value(), "125 * 8 evaluates successfully");
+    Check(r1->value == 1000.0, "125 * 8 value is 1000");
+    Check(r1->rawResult == L"1000", "125 * 8 raw result is 1000");
+    Check(r1->formattedResult == L"1000", "125 * 8 formatted result is 1000");
+
+    auto r2 = EvaluateExpression(L"2 + 2");
+    Check(r2.has_value() && r2->value == 4.0 && r2->rawResult == L"4", "2 + 2 == 4");
+
+    auto r3 = EvaluateExpression(L"100 - 35");
+    Check(r3.has_value() && r3->value == 65.0 && r3->rawResult == L"65", "100 - 35 == 65");
+
+    auto r4 = EvaluateExpression(L"100 / 4");
+    Check(r4.has_value() && r4->value == 25.0 && r4->rawResult == L"25", "100 / 4 == 25");
+
+    // 2. Precedence and parentheses
+    auto r5 = EvaluateExpression(L"2 + 3 * 4");
+    Check(r5.has_value() && r5->value == 14.0, "2 + 3 * 4 == 14");
+
+    auto r6 = EvaluateExpression(L"(2 + 3) * 4");
+    Check(r6.has_value() && r6->value == 20.0, "(2 + 3) * 4 == 20");
+
+    auto r7 = EvaluateExpression(L"10 - 2 * 3");
+    Check(r7.has_value() && r7->value == 4.0, "10 - 2 * 3 == 4");
+
+    auto r8 = EvaluateExpression(L"((5 + 5) * (3 + 2)) / 2");
+    Check(r8.has_value() && r8->value == 25.0, "nested parentheses == 25");
+
+    // 3. Decimals, negative numbers & commas
+    auto r9 = EvaluateExpression(L"0.1 + 0.2");
+    Check(r9.has_value() && r9->rawResult == L"0.3", "0.1 + 0.2 cleaned of floating noise");
+
+    auto r10 = EvaluateExpression(L"125 / 8");
+    Check(r10.has_value() && r10->value == 15.625 && r10->rawResult == L"15.625", "125 / 8 == 15.625");
+
+    auto r11 = EvaluateExpression(L"-5 + 10");
+    Check(r11.has_value() && r11->value == 5.0, "-5 + 10 == 5");
+
+    auto r12 = EvaluateExpression(L"-(3 + 2) * 4");
+    Check(r12.has_value() && r12->value == -20.0, "-(3 + 2) * 4 == -20");
+
+    auto r13 = EvaluateExpression(L"1,000 * 2");
+    Check(r13.has_value() && r13->value == 2000.0 && r13->formattedResult == L"2000", "comma thousand input separator");
+
+    // 4. Exponents & powers
+    auto r14 = EvaluateExpression(L"2^10");
+    Check(r14.has_value() && r14->value == 1024.0 && r14->formattedResult == L"1024", "2^10 == 1024");
+
+    auto r15 = EvaluateExpression(L"2**8");
+    Check(r15.has_value() && r15->value == 256.0, "2**8 == 256");
+
+    auto r16 = EvaluateExpression(L"3^3");
+    Check(r16.has_value() && r16->value == 27.0, "3^3 == 27");
+
+    // 5. Modulo & percentage
+    auto r17 = EvaluateExpression(L"10 % 3");
+    Check(r17.has_value() && r17->value == 1.0, "10 % 3 == 1");
+
+    auto r18 = EvaluateExpression(L"200 * 15%");
+    Check(r18.has_value() && r18->value == 30.0, "200 * 15% == 30");
+
+    auto r19 = EvaluateExpression(L"50% * 80");
+    Check(r19.has_value() && r19->value == 40.0, "50% * 80 == 40");
+
+    // 6. Factorials
+    auto r20 = EvaluateExpression(L"5!");
+    Check(r20.has_value() && r20->value == 120.0, "5! == 120");
+
+    auto r21 = EvaluateExpression(L"0!");
+    Check(r21.has_value() && r21->value == 1.0, "0! == 1");
+
+    // 7. Math functions
+    auto r22 = EvaluateExpression(L"sqrt(144)");
+    Check(r22.has_value() && r22->value == 12.0 && r22->rawResult == L"12", "sqrt(144) == 12");
+
+    auto r23 = EvaluateExpression(L"cbrt(27)");
+    Check(r23.has_value() && r23->value == 3.0, "cbrt(27) == 3");
+
+    auto r24 = EvaluateExpression(L"abs(-42)");
+    Check(r24.has_value() && r24->value == 42.0, "abs(-42) == 42");
+
+    auto r25 = EvaluateExpression(L"sin(0)");
+    Check(r25.has_value() && r25->value == 0.0, "sin(0) == 0");
+
+    auto r26 = EvaluateExpression(L"cos(0)");
+    Check(r26.has_value() && r26->value == 1.0, "cos(0) == 1");
+
+    auto r27 = EvaluateExpression(L"ln(e)");
+    Check(r27.has_value() && std::abs(r27->value - 1.0) < 1e-9, "ln(e) == 1");
+
+    auto r28 = EvaluateExpression(L"log10(1000)");
+    Check(r28.has_value() && r28->value == 3.0, "log10(1000) == 3");
+
+    auto r29 = EvaluateExpression(L"log2(1024)");
+    Check(r29.has_value() && r29->value == 10.0, "log2(1024) == 10");
+
+    auto r30 = EvaluateExpression(L"pow(2, 5)");
+    Check(r30.has_value() && r30->value == 32.0, "pow(2, 5) == 32");
+
+    // 8. Constants & implicit multiplication
+    auto r31 = EvaluateExpression(L"2 * pi");
+    Check(r31.has_value() && std::abs(r31->value - 6.283185307) < 1e-5, "2 * pi");
+
+    auto r32 = EvaluateExpression(L"2pi");
+    Check(r32.has_value() && std::abs(r32->value - 6.283185307) < 1e-5, "2pi implicit multiplication");
+
+    auto r33 = EvaluateExpression(L"2(3 + 4)");
+    Check(r33.has_value() && r33->value == 14.0, "2(3+4) implicit multiplication");
+
+    auto r34 = EvaluateExpression(L"(2 + 3)(4 + 5)");
+    Check(r34.has_value() && r34->value == 45.0, "(2+3)(4+5) implicit multiplication");
+
+    auto r35 = EvaluateExpression(L"5sqrt(4)");
+    Check(r35.has_value() && r35->value == 10.0, "5sqrt(4) implicit multiplication");
+
+    // 9. Alternate operators: 'x', Unicode '×', '÷'
+    auto rx1 = EvaluateExpression(L"10x10");
+    Check(rx1.has_value() && rx1->value == 100.0 && rx1->formattedResult == L"100", "10x10 == 100");
+
+    auto rx2 = EvaluateExpression(L"10X10");
+    Check(rx2.has_value() && rx2->value == 100.0 && rx2->formattedResult == L"100", "10X10 == 100");
+
+    auto rx3 = EvaluateExpression(L"10x10x10");
+    Check(rx3.has_value() && rx3->value == 1000.0, "10x10x10 == 1000");
+
+    auto rx4 = EvaluateExpression(L"2.5x4");
+    Check(rx4.has_value() && rx4->value == 10.0, "2.5x4 == 10");
+
+    auto r36 = EvaluateExpression(L"125 x 8");
+    Check(r36.has_value() && r36->value == 1000.0, "125 x 8 == 1000");
+
+    auto r37 = EvaluateExpression(L"125 \u00D7 8");
+    Check(r37.has_value() && r37->value == 1000.0, "125 \u00D7 8 == 1000");
+
+    auto r38 = EvaluateExpression(L"100 \u00F7 4");
+    Check(r38.has_value() && r38->value == 25.0, "100 \u00F7 4 == 25");
+
+    // 10. Equals prefix and suffix
+    auto r39 = EvaluateExpression(L"= 125 * 8");
+    Check(r39.has_value() && r39->value == 1000.0, "= 125 * 8 == 1000");
+
+    auto r40 = EvaluateExpression(L"125 * 8 =");
+    Check(r40.has_value() && r40->value == 1000.0, "125 * 8 = == 1000");
+
+    auto r41 = EvaluateExpression(L"= 42");
+    Check(r41.has_value() && r41->value == 42.0, "= 42 == 42");
+
+    // 11. Rejection of non-mathematical queries (preserves normal app and file search)
+    Check(!EvaluateExpression(L"cal").has_value(), "'cal' is not evaluated as calculation");
+    Check(!EvaluateExpression(L"notepad").has_value(), "'notepad' is not evaluated as calculation");
+    Check(!EvaluateExpression(L"chrome").has_value(), "'chrome' is not evaluated as calculation");
+    Check(!EvaluateExpression(L"win 11").has_value(), "'win 11' is not evaluated as calculation");
+    Check(!EvaluateExpression(L"office 365").has_value(), "'office 365' is not evaluated as calculation");
+    Check(!EvaluateExpression(L"gta 5").has_value(), "'gta 5' is not evaluated as calculation");
+    Check(!EvaluateExpression(L"42").has_value(), "bare number '42' without operators is not a calculation");
+    Check(!EvaluateExpression(L"125 * ").has_value(), "incomplete expression '125 * ' rejected");
+    Check(!EvaluateExpression(L"(2 + 3").has_value(), "unmatched '(' rejected");
+    Check(!EvaluateExpression(L"10 / 0").has_value(), "division by zero rejected");
+    Check(!EvaluateExpression(L"sqrt(-4)").has_value(), "sqrt of negative number rejected");
+    Check(!EvaluateExpression(L"").has_value(), "empty input rejected");
+    Check(!EvaluateExpression(L"   ").has_value(), "whitespace input rejected");
+
+    // 12. Launcher integration & ranking invariants
+    {
+        struct MockApp {
+            std::wstring name;
+            std::wstring path;
+            AppCategory category;
+            std::wstring parameters;
+        };
+        std::vector<MockApp> mockApps = {
+            {L"Calculator", L"calc.exe", AppCategory::Application, L""},
+            {L"Calendar", L"calendar.exe", AppCategory::Application, L""}
+        };
+        std::vector<size_t> results;
+        // Search query "125 * 8"
+        std::wstring expr = L"125 * 8";
+        auto calc = EvaluateExpression(expr);
+        Check(calc.has_value(), "calc evaluated for input 125 * 8");
+        MockApp calcEntry{calc->formattedResult, calc->rawResult, AppCategory::Calculator, calc->expression};
+        size_t calcIdx = mockApps.size();
+        mockApps.push_back(calcEntry);
+        results.insert(results.begin(), calcIdx);
+
+        Check(results.size() == 1, "calculator result added to results");
+        Check(results[0] == calcIdx, "calculator result is at index 0");
+        Check(mockApps[results[0]].category == AppCategory::Calculator, "result has Calculator category");
+        Check(mockApps[results[0]].name == L"1000", "result name is 1000 without commas");
+        Check(mockApps[results[0]].path == L"1000", "result path is raw 1000 for clipboard copy");
+        Check(mockApps[results[0]].parameters == L"125 * 8", "parameters stores original expression");
+    }
+
+    std::cout << "All search, calculator, text editing, hotkey, and settings scroll checks passed in " << elapsed << "ms.\n";
 }
