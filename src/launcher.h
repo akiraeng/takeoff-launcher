@@ -506,6 +506,7 @@ private:
                 settings_.checkForUpdates = ReadDword(key, L"CheckForUpdates", 1) != 0;
                 settings_.enableFileSearch = ReadDword(key, L"FileSearchEnabled", 1) != 0;
                 settings_.enableWebSearch = ReadDword(key, L"WebSearchEnabled", 1) != 0;
+                settings_.runAtStartup = ReadDword(key, L"RunAtStartup", 1) != 0;
                 const DWORD low = ReadDword(key, L"LastUpdateCheckLow", 0);
                 const DWORD high = ReadDword(key, L"LastUpdateCheckHigh", 0);
                 lastUpdateCheck_ = (static_cast<uint64_t>(high) << 32) | low;
@@ -526,26 +527,24 @@ private:
                 RegCloseKey(key);
             }
             HKEY startup = nullptr;
-            settings_.runAtStartup =
-                RegOpenKeyExW(HKEY_CURRENT_USER, kStartupRegistryPath, 0, KEY_QUERY_VALUE, &startup) ==
-                ERROR_SUCCESS;
-            if (settings_.runAtStartup) {
+            bool startupRegistered = false;
+            if (RegOpenKeyExW(HKEY_CURRENT_USER, kStartupRegistryPath, 0, KEY_QUERY_VALUE, &startup) == ERROR_SUCCESS) {
                 wchar_t existingCmd[MAX_PATH * 2]{};
                 DWORD size = sizeof(existingCmd);
-                settings_.runAtStartup =
-                    RegGetValueW(startup, nullptr, kStartupValueName, RRF_RT_REG_SZ,
-                        nullptr, existingCmd, &size) ==
-                    ERROR_SUCCESS;
+                startupRegistered = (RegGetValueW(startup, nullptr, kStartupValueName, RRF_RT_REG_SZ,
+                    nullptr, existingCmd, &size) == ERROR_SUCCESS);
                 RegCloseKey(startup);
                 if (settings_.runAtStartup) {
                     wchar_t currentExe[MAX_PATH]{};
                     if (GetModuleFileNameW(nullptr, currentExe, MAX_PATH)) {
                         const std::wstring expectedCmd = L"\"" + std::wstring(currentExe) + L"\" --minimized";
-                        if (_wcsicmp(existingCmd, expectedCmd.c_str()) != 0) {
+                        if (!startupRegistered || _wcsicmp(existingCmd, expectedCmd.c_str()) != 0) {
                             SetRunAtStartup(true);
                         }
                     }
                 }
+            } else if (settings_.runAtStartup) {
+                SetRunAtStartup(true);
             }
             LoadRecent();
         }
@@ -618,6 +617,7 @@ private:
                 {L"CheckForUpdates", settings_.checkForUpdates ? 1u : 0u},
                 {L"FileSearchEnabled", settings_.enableFileSearch ? 1u : 0u},
                 {L"WebSearchEnabled", settings_.enableWebSearch ? 1u : 0u},
+                {L"RunAtStartup", settings_.runAtStartup ? 1u : 0u},
             };
             bool saved = true;
             for (const auto& entry : entries) {
@@ -1154,8 +1154,10 @@ private:
         switch (row) {
         case 4: {
             const bool enabled = !settings_.runAtStartup;
-            if (SetRunAtStartup(enabled)) settings_.runAtStartup = enabled;
-            else settingsStatus_ = L"Windows would not update the startup setting.";
+            if (SetRunAtStartup(enabled)) {
+                settings_.runAtStartup = enabled;
+                SaveSettings();
+            } else settingsStatus_ = L"Windows would not update the startup setting.";
             break;
         }
         case 5:

@@ -366,8 +366,11 @@ int main() {
     int fileScore = ScoreFile(L"code txt", L"code");
     Check(appScore > fileScore, "app 'Visual Studio Code' strictly beats file 'code.txt'");
 
-    // 3. Settings enableFileSearch and enableWebSearch defaults and toggles
+    // 3. Settings defaults and toggles
     Settings defaultSettings;
+    Check(defaultSettings.runAtStartup == true, "run at startup enabled by default in settings");
+    defaultSettings.runAtStartup = false;
+    Check(!defaultSettings.runAtStartup, "run at startup toggle can be disabled");
     Check(defaultSettings.enableFileSearch == true, "file search enabled by default in settings");
     defaultSettings.enableFileSearch = false;
     Check(!defaultSettings.enableFileSearch, "file search toggle can be disabled");
