@@ -1447,7 +1447,14 @@ private:
             return 0;
         }
         switch (key) {
-        case VK_RETURN: LaunchSelected(MatchesAdministratorHotkey(control, shift, alt)); return 0;
+        case VK_RETURN:
+            // If no search results match, search the web in user's default browser
+            if (results_.empty() && !input_.text.empty()) {
+                takeoff::OpenWebSearch(input_.text);
+                Hide();
+                return 0;
+            }
+            LaunchSelected(MatchesAdministratorHotkey(control, shift, alt)); return 0;
         case VK_UP: MoveSelection(-1, true); return 0;
         case VK_DOWN: MoveSelection(1, true); return 0;
         case VK_TAB: MoveSelection(shift ? -1 : 1, true); return 0;
@@ -2371,8 +2378,9 @@ private:
                     ? L"No applications found" : L"No matching applications",
                 D2D1::RectF(32, center - 13, width_ - 32, center + 17), resultFormat_.Get(),
                 Foreground(), DWRITE_TEXT_ALIGNMENT_CENTER);
-            Text(!indexReady_ ? L"Your Start Menu and installed apps will appear here." : input_.text.empty()
-                    ? L"Apps from your Start Menu appear here." : L"Try a shorter name, or press Esc to clear your search.",
+            const std::wstring hintText = !indexReady_ ? L"Your Start Menu and installed apps will appear here." : input_.text.empty()
+                    ? L"Apps from your Start Menu appear here." : L"Press Enter to search the web for \"" + input_.text + L"\"";
+            Text(hintText,
                 D2D1::RectF(32, center + 20, width_ - 32, center + 48), hintFormat_.Get(),
                 Muted(), DWRITE_TEXT_ALIGNMENT_CENTER);
             return;
