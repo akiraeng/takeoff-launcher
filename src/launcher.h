@@ -40,6 +40,7 @@ public:
         EnsureTarget();
         RegisterShortcut();
         UpdateTrayIcon();
+        takeoff::CleanupOldUpdates();
         try {
             iconThread_ = std::thread([this] { IconWorkerMain(); });
         } catch (const std::system_error&) {
@@ -215,10 +216,24 @@ private:
             }
             return 0;
         }
-        case kUpdateCheckCompletedMessage:
-            updateAvailable_ = (wParam != 0);
+        case kUpdateCheckCompletedMessage: {
+            std::unique_ptr<std::wstring> pathPtr(reinterpret_cast<std::wstring*>(lParam));
+            if (wParam == 2) {
+                updateDownloaded_ = true;
+                updateAvailable_ = true;
+                if (pathPtr && !pathPtr->empty()) {
+                    downloadedUpdatePath_ = *pathPtr;
+                }
+            } else if (wParam == 1) {
+                updateAvailable_ = true;
+                updateDownloaded_ = false;
+            } else {
+                updateAvailable_ = false;
+                updateDownloaded_ = false;
+            }
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
+        }
         case WM_ACTIVATE:
             if (LOWORD(wParam) == WA_INACTIVE && IsWindowVisible(hwnd_)) Hide();
             return 0;
@@ -665,6 +680,9 @@ private:
         if constexpr (kUiTest) return;
         if (!settings_.checkForUpdates) return;
         (void)force;
+        if (updateInProgress_.exchange(true)) {
+            return; // Already checking or downloading, do not block UI
+        }
         if (updateThread_.joinable()) {
             updateThread_.join();
         }
@@ -675,18 +693,39 @@ private:
         const std::wstring host = apiHost_;
         const std::wstring path = apiPath_;
         try {
-            updateThread_ = std::thread([hwnd, host, path] {
+            updateThread_ = std::thread([this, hwnd, host, path] {
+                struct Guard {
+                    std::atomic<bool>& flag;
+                    ~Guard() { flag = false; }
+                } guard{updateInProgress_};
+
                 std::wstring tag;
                 std::wstring htmlUrl;
-                if (takeoff::QueryLatestReleaseTag(host, path, tag, htmlUrl)) {
+                std::wstring assetUrl;
+                if (takeoff::QueryLatestReleaseInfo(host, path, tag, htmlUrl, assetUrl)) {
                     if (takeoff::IsNewerVersion(tag, takeoff::kAppVersion)) {
+                        const std::wstring stagingPath = takeoff::GetUpdateStagingPath(tag);
+                        if (!stagingPath.empty() && takeoff::ValidateExecutableFile(stagingPath)) {
+                            auto* p = new std::wstring(stagingPath);
+                            PostMessageW(hwnd, kUpdateCheckCompletedMessage, 2, reinterpret_cast<LPARAM>(p));
+                            return;
+                        }
+                        if (!assetUrl.empty() && !stagingPath.empty()) {
+                            if (takeoff::DownloadUpdateFile(assetUrl, stagingPath)) {
+                                auto* p = new std::wstring(stagingPath);
+                                PostMessageW(hwnd, kUpdateCheckCompletedMessage, 2, reinterpret_cast<LPARAM>(p));
+                                return;
+                            }
+                        }
                         PostMessageW(hwnd, kUpdateCheckCompletedMessage, 1, 0);
                         return;
                     }
                 }
                 PostMessageW(hwnd, kUpdateCheckCompletedMessage, 0, 0);
             });
-        } catch (const std::system_error&) {}
+        } catch (const std::system_error&) {
+            updateInProgress_ = false;
+        }
     }
 
     bool SetRunAtStartup(bool enabled) {
@@ -815,6 +854,30 @@ private:
         trayIconAdded_ = false;
     }
 
+    void RestartToUpdate() {
+        std::wstring targetPath = downloadedUpdatePath_;
+        if (targetPath.empty() || !takeoff::ValidateExecutableFile(targetPath)) {
+            wchar_t localAppData[MAX_PATH]{};
+            if (GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH) > 0 && localAppData[0]) {
+                std::error_code ec;
+                std::filesystem::path updateDir = std::filesystem::path(localAppData) / L"Takeoff" / L"updates";
+                for (const auto& entry : std::filesystem::directory_iterator(updateDir, ec)) {
+                    if (entry.is_regular_file(ec) && entry.path().extension() == L".exe") {
+                        if (takeoff::ValidateExecutableFile(entry.path().wstring())) {
+                            targetPath = entry.path().wstring();
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (!targetPath.empty() && takeoff::ApplyUpdateAndRestart(targetPath)) {
+            DestroyWindow(hwnd_);
+            return;
+        }
+        ShellExecuteW(nullptr, L"open", releasesUrl_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+
     void HandleTrayMessage(UINT message) {
         if (message == WM_LBUTTONUP || message == NIN_SELECT || message == NIN_KEYSELECT) {
             Show();
@@ -825,6 +888,10 @@ private:
         GetCursorPos(&point);
         HMENU menu = CreatePopupMenu();
         if (!menu) return;
+        if (updateDownloaded_) {
+            AppendMenuW(menu, MF_STRING, 5, L"Restart to Update");
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        }
         AppendMenuW(menu, MF_STRING, 1, L"Open Takeoff");
         AppendMenuW(menu, MF_STRING, 2, L"Settings");
         AppendMenuW(menu, MF_STRING, 4, L"Reload Programs");
@@ -838,6 +905,7 @@ private:
         else if (command == 2) { Show(); OpenSettings(); }
         else if (command == 3) DestroyWindow(hwnd_);
         else if (command == 4) TriggerAppReindex();
+        else if (command == 5) RestartToUpdate();
     }
 
     void ApplyBackdrop() {
@@ -1314,6 +1382,7 @@ private:
             SaveSettings();
             if (!settings_.checkForUpdates) {
                 updateAvailable_ = false;
+                updateDownloaded_ = false;
             } else {
                 CheckForUpdatesAsync(true);
             }
@@ -2022,7 +2091,11 @@ private:
             }
         } else if (y >= FooterTop()) {
             if (PointInUpdateIndicator(x, y)) {
-                ShellExecuteW(nullptr, L"open", releasesUrl_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                if (updateDownloaded_) {
+                    RestartToUpdate();
+                } else {
+                    ShellExecuteW(nullptr, L"open", releasesUrl_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                }
                 return;
             }
             if (x >= width_ / 2) {
@@ -2835,7 +2908,8 @@ private:
     D2D1_RECT_F UpdateIndicatorRect() const {
         const float top = FooterTop();
         const float cx = width_ / 2.0f;
-        return D2D1::RectF(cx - 70.0f, top, cx + 70.0f, height_);
+        const float halfWidth = updateDownloaded_ ? 80.0f : 70.0f;
+        return D2D1::RectF(cx - halfWidth, top, cx + halfWidth, height_);
     }
 
     bool PointInUpdateIndicator(float x, float y) const {
@@ -2860,6 +2934,38 @@ private:
     void DrawUpdateIndicator() {
         if (!updateAvailable_) return;
         const auto rect = UpdateIndicatorRect();
+        const bool hovering = mouseKnown_ && PointInUpdateIndicator(mouseX_, mouseY_);
+
+        if (updateDownloaded_) {
+            const float btnHeight = 26.0f;
+            const float btnTop = rect.top + (kFooterHeight - btnHeight) / 2.0f;
+            const auto btnRect = D2D1::RectF(rect.left, btnTop, rect.right, btnTop + btnHeight);
+
+            const auto bgColor = highContrast_
+                ? (hovering ? SystemColor(COLOR_HIGHLIGHT) : SystemColor(COLOR_BTNFACE))
+                : (hovering ? D2D1::ColorF(0x3B82F6) : D2D1::ColorF(0x2563EB));
+            Fill(btnRect, bgColor, 6.0f);
+
+            brush_->SetColor(highContrast_
+                ? Foreground()
+                : (hovering ? D2D1::ColorF(1, 1, 1, 0.40f) : D2D1::ColorF(1, 1, 1, 0.20f)));
+            target_->DrawRoundedRectangle(D2D1::RoundedRect(btnRect, 6.0f, 6.0f), brush_.Get(), 1.0f);
+
+            const std::wstring_view text = L"Restart to Update";
+            auto layout = Layout(text, hintFormat_.Get(), btnRect.right - btnRect.left, btnRect.bottom - btnRect.top);
+            if (layout) {
+                layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                const auto textColor = highContrast_
+                    ? (hovering ? SystemColor(COLOR_HIGHLIGHTTEXT) : Foreground())
+                    : D2D1::ColorF(0xFFFFFF);
+                brush_->SetColor(textColor);
+                target_->DrawTextLayout(D2D1::Point2F(btnRect.left, btnRect.top), layout.Get(), brush_.Get(),
+                    D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            }
+            return;
+        }
+
         const std::wstring_view text = L"Update Available";
         auto layout = Layout(text, hintFormat_.Get(), rect.right - rect.left, rect.bottom - rect.top);
         if (!layout) return;
@@ -2867,7 +2973,6 @@ private:
         layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         layout->SetUnderline(TRUE, DWRITE_TEXT_RANGE{0, static_cast<UINT32>(text.size())});
 
-        const bool hovering = mouseKnown_ && PointInUpdateIndicator(mouseX_, mouseY_);
         const auto color = highContrast_ ? Foreground()
             : hovering ? D2D1::ColorF(0x9EC5FE) : D2D1::ColorF(0x6EA8FE);
         brush_->SetColor(color);
@@ -3372,9 +3477,12 @@ private:
     int hoverLockRow_ = -1;
     float actionsX_ = 0, actionsY_ = 0;
     bool updateAvailable_ = false;
+    bool updateDownloaded_ = false;
+    std::wstring downloadedUpdatePath_;
     bool updateHovered_ = false;
     bool webSearchCardHovered_ = false;
     bool adminActionHovered_ = false;
+    std::atomic<bool> updateInProgress_{false};
     std::thread updateThread_;
     uint64_t lastUpdateCheck_ = 0;
     std::wstring releasesUrl_ = takeoff::kDefaultReleasesUrl;

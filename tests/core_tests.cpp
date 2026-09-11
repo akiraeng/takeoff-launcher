@@ -267,6 +267,48 @@ int main() {
     Check(ExtractTagName("{\"message\":\"Not Found\"}").empty(), "extract tag_name not found");
     Check(ExtractTagName("").empty(), "extract tag_name empty");
 
+    // Asset URL extraction checks
+    const std::string mockReleaseJson =
+        "{\n"
+        "  \"tag_name\": \"v1.1.0\",\n"
+        "  \"assets\": [\n"
+        "    {\"name\": \"Takeoff-v1.1.0-windows-x64.zip\", \"browser_download_url\": \"https://github.com/akiraeng/takeoff-launcher/releases/download/v1.1.0/Takeoff-v1.1.0-windows-x64.zip\"},\n"
+        "    {\"name\": \"Takeoff-v1.1.0-windows-x64.zip.sha256\", \"browser_download_url\": \"https://github.com/akiraeng/takeoff-launcher/releases/download/v1.1.0/Takeoff-v1.1.0-windows-x64.zip.sha256\"},\n"
+        "    {\"name\": \"Takeoff.exe\", \"browser_download_url\": \"https://github.com/akiraeng/takeoff-launcher/releases/download/v1.1.0/Takeoff.exe\"}\n"
+        "  ]\n"
+        "}";
+    Check(ExtractAssetDownloadUrl(mockReleaseJson, L"v1.1.0") ==
+          L"https://github.com/akiraeng/takeoff-launcher/releases/download/v1.1.0/Takeoff.exe",
+          "extract asset url preferred match");
+
+    const std::string mockFallbackJson =
+        "{\n"
+        "  \"tag_name\": \"v1.2.0\",\n"
+        "  \"assets\": [\n"
+        "    {\"name\": \"Takeoff-v1.2.0.exe\", \"browser_download_url\": \"https://github.com/akiraeng/takeoff-launcher/releases/download/v1.2.0/Takeoff-v1.2.0.exe\"}\n"
+        "  ]\n"
+        "}";
+    Check(ExtractAssetDownloadUrl(mockFallbackJson, L"v1.2.0") ==
+          L"https://github.com/akiraeng/takeoff-launcher/releases/download/v1.2.0/Takeoff-v1.2.0.exe",
+          "extract asset url secondary exe match");
+
+    Check(ExtractAssetDownloadUrl("{}", L"v2.0.0") ==
+          L"https://github.com/akiraeng/takeoff-launcher/releases/download/v2.0.0/Takeoff.exe",
+          "extract asset url fallback URL from tag");
+
+    // Staging path and executable validation checks
+    const std::wstring stagingPath = GetUpdateStagingPath(L"v1.1.0");
+    Check(!stagingPath.empty(), "staging path generated");
+    Check(stagingPath.find(L"Takeoff_v1.1.0.exe") != std::wstring::npos ||
+          stagingPath.find(L"Takeoff_update.exe") != std::wstring::npos,
+          "staging path ends with exe name");
+
+    Check(!ValidateExecutableFile(L"C:\\non_existent_file_12345.exe"), "validate non-existent file fails");
+
+    wchar_t ownExe[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, ownExe, MAX_PATH);
+    Check(ValidateExecutableFile(ownExe), "validate own PE executable succeeds");
+
     Check(IsNewerVersion(L"v1.0.1", L"1.0.0"), "v1.0.1 is newer than 1.0.0");
     Check(IsNewerVersion(L"1.1.0", L"1.0.0"), "1.1.0 is newer than 1.0.0");
     Check(IsNewerVersion(L"v2.0", L"1.9.9"), "v2.0 is newer than 1.9.9");
@@ -285,12 +327,27 @@ int main() {
     Check(ShouldCheckForUpdates(200000, 100000, true), "check when system clock shifted backwards");
 
     // Live WinHTTP GitHub query verification
-    std::wstring liveTag, liveUrl;
-    if (QueryLatestReleaseTag(L"api.github.com", L"/repos/microsoft/terminal/releases/latest", liveTag, liveUrl)) {
+    std::wstring liveTag, liveUrl, liveAssetUrl;
+    if (QueryLatestReleaseInfo(L"api.github.com", L"/repos/akiraeng/takeoff-launcher/releases/latest", liveTag, liveUrl, liveAssetUrl)) {
         Check(!liveTag.empty(), "live GitHub query returned a release tag");
-        Check(IsNewerVersion(liveTag, kAppVersion), "live release tag is newer than current 1.0.0");
+        Check(!liveAssetUrl.empty(), "live GitHub query returned an asset URL");
         std::wcout << L"[LIVE TEST] Successfully queried GitHub API! Latest release: " 
-                  << liveTag << L'\n';
+                  << liveTag << L", asset: " << liveAssetUrl << L'\n';
+
+        // Test live download of the release asset with redirect follow
+        wchar_t tempPath[MAX_PATH]{};
+        if (GetTempPathW(MAX_PATH, tempPath) > 0) {
+            const std::wstring testDownloadPath = std::wstring(tempPath) + L"Takeoff_download_test.exe";
+            DeleteFileW(testDownloadPath.c_str());
+            const bool downloaded = DownloadUpdateFile(liveAssetUrl, testDownloadPath);
+            Check(downloaded, "download and validate release asset from live GitHub");
+            Check(ValidateExecutableFile(testDownloadPath), "downloaded file is valid executable");
+            DeleteFileW(testDownloadPath.c_str());
+            std::wcout << L"[LIVE TEST] Successfully downloaded and validated update executable from GitHub!\n";
+        }
+    } else if (QueryLatestReleaseTag(L"api.github.com", L"/repos/microsoft/terminal/releases/latest", liveTag, liveUrl)) {
+        Check(!liveTag.empty(), "live GitHub query returned a release tag");
+        std::wcout << L"[LIVE TEST] Fallback query latest release: " << liveTag << L'\n';
     }
 
     // App recents preservation across index reload verification

@@ -12,6 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Instant Result Display & Copy**: Top-ranked calculation result displayed with dedicated calculator badge, immediate `Enter` shortcut to copy the result and close, and `Ctrl+C` to copy without closing.
 - **Calculator Actions**: Context actions (`Ctrl+K`) for copying the numeric result, copying the full calculation (`expression = result`), or opening Windows Calculator.
 
+## [1.0.3] - 2026-09-12
+
+### Added
+- **Automatic Silent Update Downloading**: Releases are downloaded in the background from GitHub Releases using WinHTTP streaming with HTTP 302 cross-domain redirect following (GitHub to AWS S3).
+- **Restart to Update**: Interactive "Restart to Update" button in the footer and tray menu once an update has been silently downloaded and validated.
+- **Robust In-Place Executable Swap**: Atomic executable replacement with rollback protection, retry loops for transient antivirus scanner locks, and UAC elevation fallback for protected install locations.
+- **PE Executable Verification**: Integrity check verifying DOS magic, `IMAGE_NT_SIGNATURE`, and x64 architecture before any update can be staged or installed.
+
 ## [1.0.2] - 2026-09-09
 
 ### Added
