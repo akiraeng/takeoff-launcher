@@ -24,6 +24,10 @@ int main() {
     Check(MatchScore(L"notepad", L"xyz") == -1, "no match");
     Check(MatchScore(L"notepad", L"") == -1, "empty query");
 
+    // URL encoding tests
+    Check(UrlEncode(L"hello world") == L"hello+world", "url encode space");
+    Check(UrlEncode(L"c++ vector") == L"c%2B%2B+vector", "url encode symbols");
+
     // Acronym and initials matching
     Check(MatchScore(L"visual studio code", L"vsc") > 0, "acronym vsc");
     Check(MatchScore(L"task manager", L"tm") > 0, "acronym tm");
