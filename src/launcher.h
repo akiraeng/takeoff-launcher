@@ -2378,7 +2378,7 @@ private:
                 D2D1::RectF(32, center - 13, width_ - 32, center + 17), resultFormat_.Get(),
                 Foreground(), DWRITE_TEXT_ALIGNMENT_CENTER);
             Text(!indexReady_ ? L"Your Start Menu and installed apps will appear here." : input_.text.empty()
-                    ? L"Apps from your Start Menu appear here." : L"Press Enter to search the web for \"" + input_.text + L"\"",
+                    ? L"Apps from your Start Menu appear here." : L"Try a shorter name, or press Esc to clear your search.",
                 D2D1::RectF(32, center + 20, width_ - 32, center + 48), hintFormat_.Get(),
                 Muted(), DWRITE_TEXT_ALIGNMENT_CENTER);
             return;
