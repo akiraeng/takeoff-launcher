@@ -505,6 +505,7 @@ private:
                 settings_.showTrayIcon = ReadDword(key, L"ShowTrayIcon", 1) != 0;
                 settings_.checkForUpdates = ReadDword(key, L"CheckForUpdates", 1) != 0;
                 settings_.enableFileSearch = ReadDword(key, L"FileSearchEnabled", 1) != 0;
+                settings_.enableWebSearch = ReadDword(key, L"WebSearchEnabled", 1) != 0;
                 const DWORD low = ReadDword(key, L"LastUpdateCheckLow", 0);
                 const DWORD high = ReadDword(key, L"LastUpdateCheckHigh", 0);
                 lastUpdateCheck_ = (static_cast<uint64_t>(high) << 32) | low;
@@ -616,6 +617,7 @@ private:
                 {L"ShowTrayIcon", settings_.showTrayIcon ? 1u : 0u},
                 {L"CheckForUpdates", settings_.checkForUpdates ? 1u : 0u},
                 {L"FileSearchEnabled", settings_.enableFileSearch ? 1u : 0u},
+                {L"WebSearchEnabled", settings_.enableWebSearch ? 1u : 0u},
             };
             bool saved = true;
             for (const auto& entry : entries) {
@@ -938,7 +940,7 @@ private:
     }
 
     float SettingsContentBottom() const {
-        return 280.0f + 4 * kSettingsRowHeight + 14.0f;
+        return 280.0f + 5 * kSettingsRowHeight + 14.0f;
     }
 
     float SettingsContentHeight() const {
@@ -971,16 +973,16 @@ private:
     }
 
     void EnsureSettingsVisible(int row) {
-        if (row == 8) {
+        if (row == 9) {
             settingsScroll_ = 0.0f;
             return;
         }
-        if (row < 0 || row > 7) return;
+        if (row < 0 || row > 8) return;
         const float rTop = SettingsRowTop(row);
         const float rBottom = rTop + kSettingsRowHeight;
         const float maxScroll = SettingsMaxScroll();
         const float visibleTop = (row == 0) ? 48.0f : (row == 4 ? 260.0f : rTop);
-        const float visibleBottom = (row == 7) ? (rBottom + 14.0f) : rBottom;
+        const float visibleBottom = (row == 8) ? (rBottom + 14.0f) : rBottom;
 
         if (visibleTop - settingsScroll_ < kSettingsHeaderHeight + 2.0f) {
             settingsScroll_ = (std::max)(0.0f, visibleTop - (kSettingsHeaderHeight + 2.0f));
@@ -1138,7 +1140,7 @@ private:
 
     void ChangeSetting(int row) {
         settingsStatus_.clear();
-        if (row == 8) {
+        if (row == 9) {
             ResetToDefaults();
             return;
         }
@@ -1173,6 +1175,10 @@ private:
             settings_.enableFileSearch = !settings_.enableFileSearch;
             SaveSettings();
             UpdateResults();
+            break;
+        case 8:
+            settings_.enableWebSearch = !settings_.enableWebSearch;
+            SaveSettings();
             break;
         }
         InvalidateRect(hwnd_, nullptr, FALSE);
@@ -1377,11 +1383,11 @@ private:
             if (key == VK_ESCAPE || (alt && key == VK_LEFT)) {
                 CloseSettings();
             } else if (key == VK_UP || (key == VK_TAB && shift)) {
-                settingsSelected_ = (settingsSelected_ + 8) % 9;
+                settingsSelected_ = (settingsSelected_ + 9) % 10;
                 EnsureSettingsVisible(settingsSelected_);
                 InvalidateRect(hwnd_, nullptr, FALSE);
             } else if (key == VK_DOWN || key == VK_TAB) {
-                settingsSelected_ = (settingsSelected_ + 1) % 9;
+                settingsSelected_ = (settingsSelected_ + 1) % 10;
                 EnsureSettingsVisible(settingsSelected_);
                 InvalidateRect(hwnd_, nullptr, FALSE);
             } else if (key == VK_HOME) {
@@ -1449,8 +1455,27 @@ private:
         switch (key) {
         case VK_RETURN:
             if (results_.empty() && !input_.text.empty()) {
-                takeoff::OpenWebSearch(input_.text);
-                Hide();
+                if (!settings_.enableWebSearch) {
+                    status_ = L"No results. Web search is disabled in settings.";
+                    ResetCaret();
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return 0;
+                }
+                const bool allReady = indexReady_ &&
+                    (!settings_.enableFileSearch || takeoff::FileIndex::Instance().IsReady());
+                if (allReady) {
+                    if (takeoff::OpenWebSearch(input_.text)) {
+                        Hide();
+                    } else {
+                        status_ = L"Could not open your browser. Try another query.";
+                        ResetCaret();
+                        InvalidateRect(hwnd_, nullptr, FALSE);
+                    }
+                } else {
+                    status_ = L"Still indexing\u2009—\u2009try again in a moment.";
+                    ResetCaret();
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                }
                 return 0;
             }
             LaunchSelected(MatchesAdministratorHotkey(control, shift, alt)); return 0;
@@ -1725,7 +1750,7 @@ private:
             int row = -1;
             if (contentY >= keyboardTop && contentY < keyboardTop + 4 * kSettingsRowHeight) {
                 row = static_cast<int>((contentY - keyboardTop) / kSettingsRowHeight);
-            } else if (contentY >= generalTop && contentY < generalTop + 4 * kSettingsRowHeight) {
+            } else if (contentY >= generalTop && contentY < generalTop + 5 * kSettingsRowHeight) {
                 row = 4 + static_cast<int>((contentY - generalTop) / kSettingsRowHeight);
             }
             if (row >= 0) {
@@ -1835,7 +1860,7 @@ private:
                 constexpr float generalTop = 280.0f;
                 if (contentY >= keyboardTop && contentY < keyboardTop + 4 * kSettingsRowHeight) {
                     row = static_cast<int>((contentY - keyboardTop) / kSettingsRowHeight);
-                } else if (contentY >= generalTop && contentY < generalTop + 4 * kSettingsRowHeight) {
+                } else if (contentY >= generalTop && contentY < generalTop + 5 * kSettingsRowHeight) {
                     row = 4 + static_cast<int>((contentY - generalTop) / kSettingsRowHeight);
                 }
             }
@@ -2744,6 +2769,8 @@ private:
             L"Check for updates when Takeoff starts", {}, true, settings_.checkForUpdates);
         DrawSettingsRow(7, generalTop + 3 * kSettingsRowHeight + offsetY, L"File search",
             L"Search files and folders on your computer", {}, true, settings_.enableFileSearch);
+        DrawSettingsRow(8, generalTop + 4 * kSettingsRowHeight + offsetY, L"Web search",
+            L"Open Google when no results match your query", {}, true, settings_.enableWebSearch);
 
         target_->PopAxisAlignedClip();
 
@@ -2775,7 +2802,7 @@ private:
 
         const float resetLeft = width_ - 136.0f, resetRight = width_ - 20.0f;
         const auto resetRect = D2D1::RectF(resetLeft, 10.0f, resetRight, 36.0f);
-        const bool resetSelected = (settingsSelected_ == 8);
+        const bool resetSelected = (settingsSelected_ == 9);
         Fill(resetRect, highContrast_
             ? (resetSelected ? SystemColor(COLOR_HIGHLIGHT) : SystemColor(COLOR_BTNFACE))
             : resetSelected ? D2D1::ColorF(1, 1, 1, 0.12f) : D2D1::ColorF(1, 1, 1, 0.05f), 5.0f);

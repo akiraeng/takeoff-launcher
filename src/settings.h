@@ -39,6 +39,7 @@ struct Settings {
     bool showTrayIcon = true;
     bool checkForUpdates = true;
     bool enableFileSearch = true;
+    bool enableWebSearch = true;
 };
 
 inline std::wstring KeyName(uint16_t vk) {
