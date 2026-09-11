@@ -35,10 +35,11 @@ struct Settings {
     HotkeyBinding actionsHotkey{kModControl, 'K'};
     HotkeyBinding administratorHotkey{kModControl, 0};
     HotkeyBinding quickLaunchHotkey{kModAlt, 0};
-    bool runAtStartup = false;
+    bool runAtStartup = true;
     bool showTrayIcon = true;
     bool checkForUpdates = true;
     bool enableFileSearch = true;
+    bool enableWebSearch = true;
 };
 
 inline std::wstring KeyName(uint16_t vk) {
