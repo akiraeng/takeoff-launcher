@@ -364,4 +364,190 @@ inline bool OpenWebSearch(std::wstring_view query) {
 
 } // namespace takeoff
 
+// ---- Math expression evaluator ----
+// Parses and evaluates expressions like "2+3*4", "(10-2)/2", "2^8", etc.
+// Returns nullopt on syntax errors or math errors (e.g. division by zero).
+namespace takeoff {
+namespace math_detail {
+
+// Non-member helpers to avoid forward-declaration issues inside struct.
+struct Parser {
+    std::wstring_view src;
+    size_t pos = 0;
+
+    void SkipSpaces() {
+        while (pos < src.size() && iswspace(src[pos])) ++pos;
+    }
+
+    bool AtEnd() { SkipSpaces(); return pos >= src.size(); }
+    wchar_t Peek() { SkipSpaces(); return pos < src.size() ? src[pos] : 0; }
+    wchar_t Get()  { SkipSpaces(); return pos < src.size() ? src[pos++] : 0; }
+
+    std::optional<double> ParsePrimary() {
+        SkipSpaces();
+        if (pos >= src.size()) return std::nullopt;
+        if (src[pos] == L'(') {
+            ++pos;
+            // Re-enter full expression parsing for parenthesized sub-expressions
+            auto val = ParseAddSub();
+            if (!val) return std::nullopt;
+            SkipSpaces();
+            if (pos < src.size() && src[pos] == L')') ++pos;
+            else return std::nullopt;
+            return val;
+        }
+        // Parse number (decimal, leading dot allowed)
+        if (!iswdigit(src[pos]) && src[pos] != L'.') return std::nullopt;
+        size_t start = pos;
+        while (pos < src.size() && iswdigit(src[pos])) ++pos;
+        if (pos < src.size() && src[pos] == L'.') {
+            ++pos;
+            while (pos < src.size() && iswdigit(src[pos])) ++pos;
+        }
+        // Scientific notation
+        if (pos < src.size() && (src[pos] == L'e' || src[pos] == L'E')) {
+            ++pos;
+            if (pos < src.size() && (src[pos] == L'+' || src[pos] == L'-')) ++pos;
+            while (pos < src.size() && iswdigit(src[pos])) ++pos;
+        }
+        try {
+            const std::wstring token(src.substr(start, pos - start));
+            return std::stod(token);
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    std::optional<double> ParseUnary() {
+        const wchar_t op = Peek();
+        if (op == L'-') { Get(); auto v = ParsePrimary(); if (!v) return std::nullopt; return -*v; }
+        if (op == L'+') { Get(); return ParsePrimary(); }
+        return ParsePrimary();
+    }
+
+    std::optional<double> ParsePower() {
+        auto base = ParseUnary();
+        if (!base) return std::nullopt;
+        if (Peek() == L'^') {
+            Get();
+            auto exp = ParseUnary();
+            if (!exp) return std::nullopt;
+            *base = std::pow(*base, *exp);
+            if (std::isnan(*base) || std::isinf(*base)) return std::nullopt;
+        }
+        return base;
+    }
+
+    std::optional<double> ParseMulDiv() {
+        auto left = ParsePower();
+        if (!left) return std::nullopt;
+        while (true) {
+            const wchar_t op = Peek();
+            if (op != L'*' && op != L'/' && op != L'%' && op != L'\xD7' && op != L'\xF7') break;
+            Get();
+            auto right = ParsePower();
+            if (!right) return std::nullopt;
+            if (op == L'/' || op == L'\xF7') {
+                if (*right == 0.0) return std::nullopt;
+                *left = *left / *right;
+            } else if (op == L'%') {
+                if (*right == 0.0) return std::nullopt;
+                *left = std::fmod(*left, *right);
+            } else {
+                *left = *left * *right;
+            }
+        }
+        return left;
+    }
+
+    std::optional<double> ParseAddSub() {
+        auto left = ParseMulDiv();
+        if (!left) return std::nullopt;
+        while (true) {
+            const wchar_t op = Peek();
+            if (op != L'+' && op != L'-') break;
+            Get();
+            auto right = ParseMulDiv();
+            if (!right) return std::nullopt;
+            *left = (op == L'+') ? *left + *right : *left - *right;
+        }
+        return left;
+    }
+
+    std::optional<double> ParseExpr() { return ParseAddSub(); }
+};
+
+} // namespace math_detail
+
+// Try to evaluate a math expression string.
+// Returns nullopt if the expression is invalid or not a math expression at all.
+inline std::optional<double> TryEvalMath(std::wstring_view expr, bool requireOp = true) {
+    if (expr.empty()) return std::nullopt;
+    bool hasOp = false;
+    bool hasDigit = false;
+    for (wchar_t ch : expr) {
+        if (iswdigit(ch)) hasDigit = true;
+        if (ch == L'+' || ch == L'-' || ch == L'*' || ch == L'/' ||
+            ch == L'%' || ch == L'^' || ch == L'\xD7' || ch == L'\xF7') hasOp = true;
+    }
+    if (!hasDigit) return std::nullopt;
+    if (requireOp && !hasOp) return std::nullopt;
+
+    math_detail::Parser parser{expr, 0};
+    auto result = parser.ParseExpr();
+    if (!result) return std::nullopt;
+    parser.SkipSpaces();
+    if (!parser.AtEnd()) return std::nullopt; // Trailing garbage
+    if (std::isnan(*result) || std::isinf(*result)) return std::nullopt;
+    return result;
+}
+
+// Format a math result: show as integer when losslessly representable, else show decimals.
+inline std::wstring FormatMathResult(double val) {
+    const double rounded = std::round(val);
+    if (std::abs(val - rounded) < 1e-9 && std::abs(rounded) < 1e15) {
+        const long long ival = static_cast<long long>(rounded);
+        return std::to_wstring(ival);
+    }
+    // Up to 10 significant digits, trim trailing zeros
+    wchar_t buf[64];
+    swprintf_s(buf, L"%.10g", val);
+    return buf;
+}
+
+// Percent-encode query string for URL embedding.
+inline std::wstring UrlEncode(std::wstring_view text) {
+    if (text.empty()) return L"";
+    const int utf8Len = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+    if (utf8Len <= 0) return L"";
+    std::string utf8(utf8Len, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), utf8.data(), utf8Len, nullptr, nullptr);
+
+    std::wstring encoded;
+    encoded.reserve(utf8.size() * 3);
+    for (unsigned char ch : utf8) {
+        if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+            (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.' || ch == '~') {
+            encoded.push_back(static_cast<wchar_t>(ch));
+        } else if (ch == ' ') {
+            encoded.push_back(L'+');
+        } else {
+            wchar_t hex[4];
+            swprintf_s(hex, L"%%%02X", ch);
+            encoded.append(hex);
+        }
+    }
+    return encoded;
+}
+
+// Open web search in default browser for the given query.
+inline bool OpenWebSearch(std::wstring_view query) {
+    if (query.empty()) return false;
+    const std::wstring url = L"https://www.google.com/search?q=" + UrlEncode(query);
+    const INT_PTR result = reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+    return result > 32;
+}
+
+} // namespace takeoff
+
 namespace quicklaunch = takeoff;

@@ -1052,6 +1052,12 @@ private:
         status_.clear();
         actionsOpen_ = false;
         ResetCaret();
+        // Evaluate math expression if input starts with '=' (e.g. "= 2 + 3")
+        mathResult_ = std::nullopt;
+        if (!input_.text.empty() && input_.text.front() == L'=') {
+            std::wstring_view expr(input_.text.data() + 1, input_.text.size() - 1);
+            mathResult_ = takeoff::TryEvalMath(expr, false);
+        }
         UpdateResults();
     }
 
@@ -1060,6 +1066,14 @@ private:
         hoverLockRow_ = -1;
         if (apps_.size() > baseAppsCount_) {
             apps_.resize(baseAppsCount_);
+        }
+        // If input starts with '=', enter calculator mode (skip app search)
+        if (!input_.text.empty() && input_.text.front() == L'=') {
+            selected_ = 0;
+            EnsureVisible();
+            PrepareVisibleIcons();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
         }
         const std::wstring query = Normalize(input_.text);
         if (input_.text.empty()) {
@@ -1435,7 +1449,15 @@ private:
         if (control) {
             switch (key) {
             case 'A': input_.SelectAll(); ResetCaret(); return 0;
-            case 'C': CopySelection(false); return 0;
+            case 'C':
+                // In calculator mode (query starting with '='), Ctrl+C copies result when there is no text selection
+                if (!input_.text.empty() && input_.text.front() == L'=' && mathResult_ && !input_.HasSelection()) {
+                    CopyText(takeoff::FormatMathResult(*mathResult_));
+                    status_ = L"Result copied to clipboard";
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return 0;
+                }
+                CopySelection(false); return 0;
             case 'X': CopySelection(true); return 0;
             case 'V': Paste(); return 0;
             case 'L': input_.SelectAll(); ResetCaret(); return 0;
@@ -1448,6 +1470,7 @@ private:
         }
         switch (key) {
         case VK_RETURN:
+
             // If no search results match, search the web in user's default browser
             if (results_.empty() && !input_.text.empty()) {
                 takeoff::OpenWebSearch(input_.text);
@@ -2359,9 +2382,46 @@ private:
         }
         GearGlyph(width_ - 28, 32);
         Line(1, kSearchHeight, width_ - 1, kSearchHeight, D2D1::ColorF(1, 1, 1, 0.09f));
+        // Draw math result inline in search bar if calculator mode is active
+        if (!input_.text.empty() && input_.text.front() == L'=' && mathResult_) {
+            const std::wstring resultText = takeoff::FormatMathResult(*mathResult_);
+            const float resultLeft = width_ * 0.55f;
+            const float resultRight = width_ - 92;
+            Text(resultText, D2D1::RectF(resultLeft, 0, resultRight, kSearchHeight),
+                searchFormat_.Get(), D2D1::ColorF(0x60A5FA), DWRITE_TEXT_ALIGNMENT_TRAILING);
+            Text(L"Enter to copy",
+                D2D1::RectF(resultLeft, kSearchHeight - 18, resultRight, kSearchHeight),
+                hintFormat_.Get(), Muted(), DWRITE_TEXT_ALIGNMENT_TRAILING);
+        }
     }
 
     void DrawResults() {
+        // Calculator mode view when query starts with '='
+        if (!input_.text.empty() && input_.text.front() == L'=') {
+            Text(L"Calculator", D2D1::RectF(16, kSearchHeight, width_ / 2, ResultsTop()),
+                hintFormat_.Get(), Muted());
+            if (mathResult_) {
+                Text(L"Enter or Ctrl+C to copy", D2D1::RectF(width_ / 2, kSearchHeight, width_ - 18, ResultsTop()),
+                    hintFormat_.Get(), Muted(), DWRITE_TEXT_ALIGNMENT_TRAILING);
+            }
+            const float center = (ResultsTop() + FooterTop()) / 2;
+            if (mathResult_) {
+                const std::wstring resStr = L"= " + takeoff::FormatMathResult(*mathResult_);
+                Text(resStr, D2D1::RectF(32, center - 24, width_ - 32, center + 16), searchFormat_.Get(),
+                    D2D1::ColorF(0x60A5FA), DWRITE_TEXT_ALIGNMENT_CENTER);
+                Text(L"Press Enter or Ctrl+C to copy result to clipboard",
+                    D2D1::RectF(32, center + 20, width_ - 32, center + 48), hintFormat_.Get(),
+                    Muted(), DWRITE_TEXT_ALIGNMENT_CENTER);
+            } else {
+                Text(L"Calculator Mode", D2D1::RectF(32, center - 13, width_ - 32, center + 17), resultFormat_.Get(),
+                    Foreground(), DWRITE_TEXT_ALIGNMENT_CENTER);
+                Text(L"Type a math expression (e.g., = 2 + 3, = (100 - 20) / 4, = 2^8)",
+                    D2D1::RectF(32, center + 20, width_ - 32, center + 48), hintFormat_.Get(),
+                    Muted(), DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
+            return;
+        }
+
         const std::wstring section = !indexReady_ ? L"Applications" : input_.text.empty()
             ? (recent_.empty() ? L"Applications" : L"Recent & all applications") : L"Results";
         Text(section, D2D1::RectF(16, kSearchHeight, width_ / 2, ResultsTop()),
@@ -2867,6 +2927,7 @@ private:
     Page page_ = Page::Launcher;
     wchar_t pendingSurrogate_ = 0;
     std::wstring composition_, status_, settingsStatus_;
+    std::optional<double> mathResult_;
     int selected_ = 0, firstVisible_ = 0, actionSelected_ = 0, wheelDelta_ = 0;
     int settingsSelected_ = 0;
     int recordingRow_ = -1;
