@@ -951,12 +951,85 @@ private:
         }
     }
 
+    enum class SettingsCategory : uint8_t { All, Shortcuts, System, Search };
+
+    static bool IsRowInCategory(int row, SettingsCategory cat) {
+        if (cat == SettingsCategory::All) return row >= 0 && row <= 8;
+        if (cat == SettingsCategory::Shortcuts) return row >= 0 && row <= 3;
+        if (cat == SettingsCategory::System) return row >= 4 && row <= 6;
+        if (cat == SettingsCategory::Search) return row >= 7 && row <= 8;
+        return false;
+    }
+
+    static int FirstRowInCategory(SettingsCategory cat) {
+        if (cat == SettingsCategory::Shortcuts) return 0;
+        if (cat == SettingsCategory::System) return 4;
+        if (cat == SettingsCategory::Search) return 7;
+        return 0;
+    }
+
+    static int LastRowInCategory(SettingsCategory cat) {
+        if (cat == SettingsCategory::Shortcuts) return 3;
+        if (cat == SettingsCategory::System) return 6;
+        if (cat == SettingsCategory::Search) return 8;
+        return 8;
+    }
+
+    int NextSettingsRow(int current, int delta) const {
+        std::vector<int> activeRows;
+        for (int r = 0; r <= 8; ++r) {
+            if (IsRowInCategory(r, settingsCategory_)) {
+                activeRows.push_back(r);
+            }
+        }
+        activeRows.push_back(9);
+        auto it = std::find(activeRows.begin(), activeRows.end(), current);
+        if (it == activeRows.end()) {
+            return activeRows.empty() ? 0 : activeRows.front();
+        }
+        int idx = static_cast<int>(std::distance(activeRows.begin(), it));
+        const int count = static_cast<int>(activeRows.size());
+        idx = (idx + delta + count) % count;
+        return activeRows[idx];
+    }
+
+    D2D1_RECT_F CategoryTabRect(SettingsCategory cat) const {
+        constexpr float y = 11.0f;
+        constexpr float h = 24.0f;
+        float x = 160.0f;
+        float w = 40.0f;
+        if (cat == SettingsCategory::Shortcuts) {
+            x = 160.0f + 40.0f + 6.0f;
+            w = 82.0f;
+        } else if (cat == SettingsCategory::System) {
+            x = 160.0f + 40.0f + 6.0f + 82.0f + 6.0f;
+            w = 68.0f;
+        } else if (cat == SettingsCategory::Search) {
+            x = 160.0f + 40.0f + 6.0f + 82.0f + 6.0f + 68.0f + 6.0f;
+            w = 68.0f;
+        }
+        return D2D1::RectF(x, y, x + w, y + h);
+    }
+
+    D2D1_RECT_F ResetButtonRect() const {
+        return D2D1::RectF(width_ - 136.0f, 10.0f, width_ - 20.0f, 36.0f);
+    }
+
     float SettingsContentBottom() const {
-        return 280.0f + 5 * kSettingsRowHeight + 14.0f;
+        if (settingsCategory_ == SettingsCategory::All) {
+            return 551.0f;
+        } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
+            return 240.0f;
+        } else if (settingsCategory_ == SettingsCategory::System) {
+            return 193.0f;
+        } else if (settingsCategory_ == SettingsCategory::Search) {
+            return 146.0f;
+        }
+        return 200.0f;
     }
 
     float SettingsContentHeight() const {
-        return SettingsContentBottom() - kSettingsHeaderHeight;
+        return SettingsContentBottom();
     }
 
     float SettingsViewportHeight() const {
@@ -964,15 +1037,36 @@ private:
     }
 
     float SettingsMaxScroll() const {
-        return (std::max)(0.0f, SettingsContentBottom() - FooterTop());
+        return (std::max)(0.0f, SettingsContentBottom() - SettingsViewportHeight());
     }
 
     float SettingsRowTop(int row) const {
-        if (row < 4) {
-            return 68.0f + row * kSettingsRowHeight;
-        } else {
-            return 280.0f + (row - 4) * kSettingsRowHeight;
+        if (settingsCategory_ == SettingsCategory::All) {
+            if (row < 4) return 36.0f + row * kSettingsRowHeight;
+            if (row < 7) return 262.0f + (row - 4) * kSettingsRowHeight;
+            return 441.0f + (row - 7) * kSettingsRowHeight;
+        } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
+            return 36.0f + row * kSettingsRowHeight;
+        } else if (settingsCategory_ == SettingsCategory::System) {
+            return 36.0f + (row - 4) * kSettingsRowHeight;
+        } else if (settingsCategory_ == SettingsCategory::Search) {
+            return 36.0f + (row - 7) * kSettingsRowHeight;
         }
+        return 0.0f;
+    }
+
+    int SettingsRowAtPoint(float x, float y) const {
+        if (x < 16.0f || x > width_ - 16.0f) return -1;
+        if (y < kSettingsHeaderHeight || y >= FooterTop()) return -1;
+        const float contentY = (y - kSettingsHeaderHeight) + settingsScroll_;
+        for (int r = 0; r <= 8; ++r) {
+            if (!IsRowInCategory(r, settingsCategory_)) continue;
+            const float rTop = SettingsRowTop(r);
+            if (contentY >= rTop && contentY < rTop + kSettingsRowHeight) {
+                return r;
+            }
+        }
+        return -1;
     }
 
     void ScrollSettings(float delta) {
@@ -989,17 +1083,25 @@ private:
             settingsScroll_ = 0.0f;
             return;
         }
-        if (row < 0 || row > 8) return;
+        if (row < 0 || row > 8 || !IsRowInCategory(row, settingsCategory_)) return;
         const float rTop = SettingsRowTop(row);
         const float rBottom = rTop + kSettingsRowHeight;
         const float maxScroll = SettingsMaxScroll();
-        const float visibleTop = (row == 0) ? 48.0f : (row == 4 ? 260.0f : rTop);
-        const float visibleBottom = (row == 8) ? (rBottom + 14.0f) : rBottom;
+        float sectionHeaderTop = rTop;
+        if (settingsCategory_ == SettingsCategory::All) {
+            if (row == 0) sectionHeaderTop = 16.0f;
+            else if (row == 4) sectionHeaderTop = 242.0f;
+            else if (row == 7) sectionHeaderTop = 421.0f;
+        } else {
+            if (row == 0 || row == 4 || row == 7) sectionHeaderTop = 16.0f;
+        }
+        const float visibleTop = sectionHeaderTop;
+        const float visibleBottom = rBottom + 8.0f;
 
-        if (visibleTop - settingsScroll_ < kSettingsHeaderHeight + 2.0f) {
-            settingsScroll_ = (std::max)(0.0f, visibleTop - (kSettingsHeaderHeight + 2.0f));
-        } else if (visibleBottom - settingsScroll_ > FooterTop() - 2.0f) {
-            settingsScroll_ = (std::min)(maxScroll, visibleBottom - (FooterTop() - 2.0f));
+        if (visibleTop - settingsScroll_ < 2.0f) {
+            settingsScroll_ = (std::max)(0.0f, visibleTop - 2.0f);
+        } else if (visibleBottom - settingsScroll_ > SettingsViewportHeight() - 2.0f) {
+            settingsScroll_ = (std::min)(maxScroll, visibleBottom - (SettingsViewportHeight() - 2.0f));
         }
     }
 
@@ -1007,6 +1109,7 @@ private:
         page_ = Page::Settings;
         actionsOpen_ = false;
         dragging_ = false;
+        settingsCategory_ = SettingsCategory::All;
         settingsSelected_ = 0;
         settingsScroll_ = 0.0f;
         settingsDraggingScroll_ = false;
@@ -1422,19 +1525,19 @@ private:
             if (key == VK_ESCAPE || (alt && key == VK_LEFT)) {
                 CloseSettings();
             } else if (key == VK_UP || (key == VK_TAB && shift)) {
-                settingsSelected_ = (settingsSelected_ + 9) % 10;
+                settingsSelected_ = NextSettingsRow(settingsSelected_, -1);
                 EnsureSettingsVisible(settingsSelected_);
                 InvalidateRect(hwnd_, nullptr, FALSE);
             } else if (key == VK_DOWN || key == VK_TAB) {
-                settingsSelected_ = (settingsSelected_ + 1) % 10;
+                settingsSelected_ = NextSettingsRow(settingsSelected_, 1);
                 EnsureSettingsVisible(settingsSelected_);
                 InvalidateRect(hwnd_, nullptr, FALSE);
             } else if (key == VK_HOME) {
-                settingsSelected_ = 0;
+                settingsSelected_ = FirstRowInCategory(settingsCategory_);
                 EnsureSettingsVisible(settingsSelected_);
                 InvalidateRect(hwnd_, nullptr, FALSE);
             } else if (key == VK_END) {
-                settingsSelected_ = 8;
+                settingsSelected_ = LastRowInCategory(settingsCategory_);
                 EnsureSettingsVisible(settingsSelected_);
                 InvalidateRect(hwnd_, nullptr, FALSE);
             } else if (key == VK_PRIOR) {
@@ -1820,42 +1923,58 @@ private:
             return;
         }
         if (page_ == Page::Settings) {
-            if (y < kSettingsHeaderHeight && x < 64) {
-                CloseSettings();
+            if (y < kSettingsHeaderHeight) {
+                if (x < 46.0f) {
+                    CloseSettings();
+                    return;
+                }
+                const SettingsCategory categories[] = {
+                    SettingsCategory::All,
+                    SettingsCategory::Shortcuts,
+                    SettingsCategory::System,
+                    SettingsCategory::Search
+                };
+                for (auto cat : categories) {
+                    const auto r = CategoryTabRect(cat);
+                    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
+                        settingsCategory_ = cat;
+                        settingsScroll_ = 0.0f;
+                        if (!IsRowInCategory(settingsSelected_, settingsCategory_)) {
+                            settingsSelected_ = FirstRowInCategory(settingsCategory_);
+                        }
+                        InvalidateRect(hwnd_, nullptr, FALSE);
+                        return;
+                    }
+                }
+                const auto resetRect = ResetButtonRect();
+                if (x >= resetRect.left && x <= resetRect.right && y >= resetRect.top && y <= resetRect.bottom) {
+                    settingsSelected_ = 9;
+                    ResetToDefaults();
+                    return;
+                }
                 return;
             }
-            const float resetLeft = width_ - 136.0f, resetRight = width_ - 20.0f;
-            if (y >= 10.0f && y <= 36.0f && x >= resetLeft && x <= resetRight) {
-                settingsSelected_ = 9;
-                ResetToDefaults();
-                return;
-            }
-            if (y < kSettingsHeaderHeight || y >= FooterTop()) {
+            if (y >= FooterTop()) {
                 return;
             }
             // Scrollbar track/thumb click & drag
             if (x >= width_ - 14.0f) {
-                const float trackTop = kSettingsHeaderHeight + 4.0f;
-                const float trackBottom = FooterTop() - 4.0f;
-                if (y >= trackTop && y <= trackBottom) {
-                    const float progress = (y - trackTop) / (trackBottom - trackTop);
-                    settingsScroll_ = std::clamp(progress * SettingsMaxScroll(), 0.0f, SettingsMaxScroll());
-                    settingsDraggingScroll_ = true;
-                    SetCapture(hwnd_);
-                    InvalidateRect(hwnd_, nullptr, FALSE);
+                const float maxScroll = SettingsMaxScroll();
+                if (maxScroll > 0.0f) {
+                    const float trackTop = kSettingsHeaderHeight + 6.0f;
+                    const float trackBottom = FooterTop() - 6.0f;
+                    if (y >= trackTop && y <= trackBottom) {
+                        const float progress = (y - trackTop) / (trackBottom - trackTop);
+                        settingsScroll_ = std::clamp(progress * maxScroll, 0.0f, maxScroll);
+                        settingsDraggingScroll_ = true;
+                        SetCapture(hwnd_);
+                        InvalidateRect(hwnd_, nullptr, FALSE);
+                    }
                 }
                 return;
             }
 
-            const float contentY = y + settingsScroll_;
-            constexpr float keyboardTop = 68.0f;
-            constexpr float generalTop = 280.0f;
-            int row = -1;
-            if (contentY >= keyboardTop && contentY < keyboardTop + 4 * kSettingsRowHeight) {
-                row = static_cast<int>((contentY - keyboardTop) / kSettingsRowHeight);
-            } else if (contentY >= generalTop && contentY < generalTop + 5 * kSettingsRowHeight) {
-                row = 4 + static_cast<int>((contentY - generalTop) / kSettingsRowHeight);
-            }
+            const int row = SettingsRowAtPoint(x, y);
             if (row >= 0) {
                 if (recordingRow_ >= 0 && row != recordingRow_) {
                     recordingRow_ = -1;
@@ -1945,29 +2064,27 @@ private:
         }
         if (page_ == Page::Settings) {
             if (settingsDraggingScroll_) {
-                const float trackTop = kSettingsHeaderHeight + 4.0f;
-                const float trackBottom = FooterTop() - 4.0f;
-                const float progress = std::clamp((y - trackTop) / (trackBottom - trackTop), 0.0f, 1.0f);
-                const float newScroll = progress * SettingsMaxScroll();
-                if (newScroll != settingsScroll_) {
-                    settingsScroll_ = newScroll;
-                    InvalidateRect(hwnd_, nullptr, FALSE);
+                const float maxScroll = SettingsMaxScroll();
+                if (maxScroll > 0.0f) {
+                    const float trackTop = kSettingsHeaderHeight + 6.0f;
+                    const float trackBottom = FooterTop() - 6.0f;
+                    const float progress = std::clamp((y - trackTop) / (trackBottom - trackTop), 0.0f, 1.0f);
+                    const float newScroll = progress * maxScroll;
+                    if (newScroll != settingsScroll_) {
+                        settingsScroll_ = newScroll;
+                        InvalidateRect(hwnd_, nullptr, FALSE);
+                    }
                 }
                 return;
             }
-            const float resetLeft = width_ - 136.0f, resetRight = width_ - 20.0f;
+            const auto resetRect = ResetButtonRect();
             int row = -1;
-            if (y >= 10.0f && y <= 36.0f && x >= resetLeft && x <= resetRight) {
-                row = 9;
-            } else if (y >= kSettingsHeaderHeight && y < FooterTop() && x < width_ - 14.0f) {
-                const float contentY = y + settingsScroll_;
-                constexpr float keyboardTop = 68.0f;
-                constexpr float generalTop = 280.0f;
-                if (contentY >= keyboardTop && contentY < keyboardTop + 4 * kSettingsRowHeight) {
-                    row = static_cast<int>((contentY - keyboardTop) / kSettingsRowHeight);
-                } else if (contentY >= generalTop && contentY < generalTop + 5 * kSettingsRowHeight) {
-                    row = 4 + static_cast<int>((contentY - generalTop) / kSettingsRowHeight);
+            if (y < kSettingsHeaderHeight) {
+                if (x >= resetRect.left && x <= resetRect.right && y >= resetRect.top && y <= resetRect.bottom) {
+                    row = 9;
                 }
+            } else if (y >= kSettingsHeaderHeight && y < FooterTop() && x < width_ - 14.0f) {
+                row = SettingsRowAtPoint(x, y);
             }
             if (row >= 0 && row != settingsSelected_) {
                 settingsSelected_ = row;
@@ -2920,121 +3037,192 @@ private:
     void DrawSettingsRow(int index, float top, std::wstring_view title,
         std::wstring_view description, std::wstring_view value = {}, bool toggle = false,
         bool enabled = false) {
-        const bool selected = index == settingsSelected_;
-        const auto row = D2D1::RectF(12, top, width_ - 12, top + kSettingsRowHeight - 2);
+        const bool selected = (index == settingsSelected_);
+        const auto row = D2D1::RectF(18, top + 1, width_ - 18, top + kSettingsRowHeight - 1);
         if (selected) {
             Fill(row, highContrast_ ? SystemColor(COLOR_HIGHLIGHT) :
-                D2D1::ColorF(1, 1, 1, 0.09f), 7);
+                D2D1::ColorF(1, 1, 1, 0.08f), 6.0f);
+        } else if (index == recordingRow_) {
+            Fill(row, D2D1::ColorF(0x3B82F6, 0.12f), 6.0f);
         }
         const auto primary = highContrast_ && selected ? SystemColor(COLOR_HIGHLIGHTTEXT) : Foreground();
         const auto secondary = highContrast_ && selected ? primary : Muted();
-        Text(title, D2D1::RectF(24, top + 3, width_ - 270, top + 27),
+
+        Text(title, D2D1::RectF(32, top + 4, width_ - 260, top + 26),
             resultFormat_.Get(), primary);
-        Text(description, D2D1::RectF(24, top + 24, width_ - 270, top + 47),
+        Text(description, D2D1::RectF(32, top + 24, width_ - 260, top + 44),
             hintFormat_.Get(), secondary);
+
         if (toggle) {
-            DrawToggle(width_ - 30, top + 24, enabled);
+            DrawToggle(width_ - 36, top + kSettingsRowHeight / 2, enabled);
         } else if (index == recordingRow_) {
-            Text(L"Press a shortcut\u2026", D2D1::RectF(width_ - 270, top, width_ - 30, top + 48),
+            Text(L"Press keys\u2026", D2D1::RectF(width_ - 240, top, width_ - 36, top + kSettingsRowHeight),
                 hintFormat_.Get(), highContrast_ ? SystemColor(COLOR_HIGHLIGHTTEXT) : D2D1::ColorF(0x6EA8FE),
                 DWRITE_TEXT_ALIGNMENT_TRAILING);
         } else {
-            Text(value, D2D1::RectF(width_ - 270, top, width_ - 42, top + 48),
-                hintFormat_.Get(), primary, DWRITE_TEXT_ALIGNMENT_TRAILING);
-            Line(width_ - 30, top + 20, width_ - 25, top + 24, secondary, 1.3f);
-            Line(width_ - 25, top + 24, width_ - 30, top + 28, secondary, 1.3f);
+            const float badgesW = KeyBadgesWidth(value);
+            DrawKeyBadges(value, width_ - 36 - badgesW, top + kSettingsRowHeight / 2);
         }
     }
 
     void DrawSettings() {
+        const float viewportTop = kSettingsHeaderHeight;
+        const float viewportBottom = FooterTop();
+        const float offsetY = viewportTop - settingsScroll_;
+
         // Scrollable content area clipped cleanly between header and footer
         target_->PushAxisAlignedClip(
-            D2D1::RectF(0, kSettingsHeaderHeight, width_, FooterTop()),
+            D2D1::RectF(0, viewportTop, width_, viewportBottom),
             D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
-        const float offsetY = -settingsScroll_;
+        auto drawCard = [this, offsetY](std::wstring_view header, float headerY, float cardY, int count) {
+            // Section title
+            Text(header, D2D1::RectF(24, headerY + offsetY, width_ - 24, headerY + 18.0f + offsetY),
+                hintFormat_.Get(), Muted());
 
-        Text(L"KEYBOARD", D2D1::RectF(20, 48.0f + offsetY, width_ - 20, 68.0f + offsetY),
-            hintFormat_.Get(), Muted());
-        constexpr float keyboardTop = 68.0f;
-        DrawSettingsRow(0, keyboardTop + offsetY, L"Open Takeoff",
-            L"Global shortcut that opens or closes the launcher",
-            quicklaunch::FormatBinding(settings_.launcherHotkey));
-        DrawSettingsRow(1, keyboardTop + kSettingsRowHeight + offsetY, L"Actions menu",
-            L"Show actions for the selected application",
-            quicklaunch::FormatBinding(settings_.actionsHotkey));
-        DrawSettingsRow(2, keyboardTop + 2 * kSettingsRowHeight + offsetY, L"Open as administrator",
-            L"Launch the selected application with elevation",
-            quicklaunch::FormatAdminBinding(settings_.administratorHotkey));
-        DrawSettingsRow(3, keyboardTop + 3 * kSettingsRowHeight + offsetY, L"Quick launch",
-            L"Open one of the eight visible results directly",
-            quicklaunch::FormatQuickLaunchBinding(settings_.quickLaunchHotkey));
+            // Card container background
+            const float cardHeight = count * kSettingsRowHeight;
+            const auto cardRect = D2D1::RectF(16, cardY + offsetY, width_ - 16, cardY + cardHeight + offsetY);
+            Fill(cardRect, highContrast_ ? SystemColor(COLOR_BTNFACE) : D2D1::ColorF(1, 1, 1, 0.035f), 8.0f);
+            brush_->SetColor(highContrast_ ? Foreground() : D2D1::ColorF(1, 1, 1, 0.07f));
+            target_->DrawRoundedRectangle(D2D1::RoundedRect(cardRect, 8.0f, 8.0f), brush_.Get(), 1.0f);
 
-        constexpr float generalTop = 280.0f;
-        Text(L"GENERAL", D2D1::RectF(20, generalTop - 20.0f + offsetY, width_ - 20, generalTop + offsetY),
-            hintFormat_.Get(), Muted());
-        DrawSettingsRow(4, generalTop + offsetY, L"Run at startup",
-            L"Start Takeoff when you sign in to Windows", {}, true, settings_.runAtStartup);
-        DrawSettingsRow(5, generalTop + kSettingsRowHeight + offsetY, L"Notification area icon",
-            L"Show Takeoff in the hidden icons area", {}, true, settings_.showTrayIcon);
-        DrawSettingsRow(6, generalTop + 2 * kSettingsRowHeight + offsetY, L"Check for updates",
-            L"Check for updates when Takeoff starts", {}, true, settings_.checkForUpdates);
-        DrawSettingsRow(7, generalTop + 3 * kSettingsRowHeight + offsetY, L"File search",
-            L"Search files and folders on your computer", {}, true, settings_.enableFileSearch);
-        DrawSettingsRow(8, generalTop + 4 * kSettingsRowHeight + offsetY, L"Web search",
-            L"Open Google when no results match your query", {}, true, settings_.enableWebSearch);
+            // Row dividers inside card
+            for (int i = 1; i < count; ++i) {
+                const float divY = cardY + i * kSettingsRowHeight + offsetY;
+                Line(28, divY, width_ - 28, divY, D2D1::ColorF(1, 1, 1, 0.045f));
+            }
+        };
+
+        if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Shortcuts) {
+            const float hY = 16.0f;
+            const float cY = 36.0f;
+            drawCard(L"KEYBOARD SHORTCUTS", hY, cY, 4);
+
+            DrawSettingsRow(0, cY + offsetY, L"Open Takeoff",
+                L"Global shortcut that opens or closes the launcher",
+                quicklaunch::FormatBinding(settings_.launcherHotkey));
+            DrawSettingsRow(1, cY + kSettingsRowHeight + offsetY, L"Actions menu",
+                L"Show actions for the selected application",
+                quicklaunch::FormatBinding(settings_.actionsHotkey));
+            DrawSettingsRow(2, cY + 2 * kSettingsRowHeight + offsetY, L"Open as administrator",
+                L"Launch the selected application with elevation",
+                quicklaunch::FormatAdminBinding(settings_.administratorHotkey));
+            DrawSettingsRow(3, cY + 3 * kSettingsRowHeight + offsetY, L"Quick launch",
+                L"Open one of the eight visible results directly",
+                quicklaunch::FormatQuickLaunchBinding(settings_.quickLaunchHotkey));
+        }
+
+        if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::System) {
+            const float hY = (settingsCategory_ == SettingsCategory::All) ? 242.0f : 16.0f;
+            const float cY = (settingsCategory_ == SettingsCategory::All) ? 262.0f : 36.0f;
+            drawCard(L"SYSTEM", hY, cY, 3);
+
+            DrawSettingsRow(4, cY + offsetY, L"Run at startup",
+                L"Start Takeoff when you sign in to Windows", {}, true, settings_.runAtStartup);
+            DrawSettingsRow(5, cY + kSettingsRowHeight + offsetY, L"Notification area icon",
+                L"Show Takeoff in the hidden icons area", {}, true, settings_.showTrayIcon);
+            DrawSettingsRow(6, cY + 2 * kSettingsRowHeight + offsetY, L"Check for updates",
+                L"Check for updates when Takeoff starts", {}, true, settings_.checkForUpdates);
+        }
+
+        if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Search) {
+            const float hY = (settingsCategory_ == SettingsCategory::All) ? 421.0f : 16.0f;
+            const float cY = (settingsCategory_ == SettingsCategory::All) ? 441.0f : 36.0f;
+            drawCard(L"SEARCH & FEATURES", hY, cY, 2);
+
+            DrawSettingsRow(7, cY + offsetY, L"File search",
+                L"Search files and folders on your computer", {}, true, settings_.enableFileSearch);
+            DrawSettingsRow(8, cY + kSettingsRowHeight + offsetY, L"Web search",
+                L"Open Google when no results match your query", {}, true, settings_.enableWebSearch);
+        }
 
         target_->PopAxisAlignedClip();
 
         // Subtle modern scrollbar thumb if content exceeds viewport
         const float maxScroll = SettingsMaxScroll();
         if (maxScroll > 0.0f) {
-            const float trackTop = kSettingsHeaderHeight + 4.0f;
-            const float trackBottom = FooterTop() - 4.0f;
+            const float trackTop = kSettingsHeaderHeight + 6.0f;
+            const float trackBottom = FooterTop() - 6.0f;
             const float trackHeight = trackBottom - trackTop;
             const float viewportHeight = SettingsViewportHeight();
             const float contentHeight = SettingsContentHeight();
-            const float thumbHeight = (std::max)(32.0f, trackHeight * (viewportHeight / contentHeight));
+            const float thumbHeight = (std::max)(28.0f, trackHeight * (viewportHeight / contentHeight));
             const float thumbTop = trackTop + (trackHeight - thumbHeight) * (settingsScroll_ / maxScroll);
             const auto thumbRect = D2D1::RectF(width_ - 7.0f, thumbTop, width_ - 3.0f, thumbTop + thumbHeight);
             Fill(thumbRect, highContrast_
                 ? SystemColor(COLOR_HIGHLIGHT)
-                : (settingsDraggingScroll_ ? D2D1::ColorF(1, 1, 1, 0.35f) : D2D1::ColorF(1, 1, 1, 0.20f)),
+                : (settingsDraggingScroll_ ? D2D1::ColorF(1, 1, 1, 0.35f) : D2D1::ColorF(1, 1, 1, 0.18f)),
                 2.0f);
         }
 
-        // Fixed header drawn above scrollable content
+        // Fixed header drawn above scrollable content (subtle translucent tint - NO BLACK BARS!)
         Fill(D2D1::RectF(1, 1, width_ - 1, kSettingsHeaderHeight), highContrast_ ? SystemColor(COLOR_WINDOW) :
-            acrylic_ ? D2D1::ColorF(0x171719, 0.98f) : D2D1::ColorF(0x252527));
-        Line(25, 23, 36, 23, Muted(), 1.6f);
-        Line(25, 23, 30, 18, Muted(), 1.6f);
-        Line(25, 23, 30, 28, Muted(), 1.6f);
-        Text(L"Settings", D2D1::RectF(50, 0, width_ - 150, kSettingsHeaderHeight),
+            D2D1::ColorF(0, 0, 0, 0.10f));
+        Line(1, kSettingsHeaderHeight, width_ - 1, kSettingsHeaderHeight,
+            D2D1::ColorF(1, 1, 1, 0.07f));
+
+        // Back button with subtle hover feedback
+        const auto backRect = D2D1::RectF(12.0f, 8.0f, 42.0f, 38.0f);
+        const bool backHover = mouseKnown_ && mouseX_ >= backRect.left && mouseX_ <= backRect.right && mouseY_ >= backRect.top && mouseY_ <= backRect.bottom;
+        if (backHover) {
+            Fill(backRect, D2D1::ColorF(1, 1, 1, 0.08f), 6.0f);
+        }
+        const auto arrowColor = backHover ? Foreground() : Muted();
+        Line(21, 23, 33, 23, arrowColor, 1.6f);
+        Line(21, 23, 26, 18, arrowColor, 1.6f);
+        Line(21, 23, 26, 28, arrowColor, 1.6f);
+
+        // Header title
+        Text(L"Settings", D2D1::RectF(48, 0, 150, kSettingsHeaderHeight),
             resultFormat_.Get(), Foreground());
 
-        const float resetLeft = width_ - 136.0f, resetRight = width_ - 20.0f;
-        const auto resetRect = D2D1::RectF(resetLeft, 10.0f, resetRight, 36.0f);
+        // Category tabs
+        const SettingsCategory categories[] = {
+            SettingsCategory::All,
+            SettingsCategory::Shortcuts,
+            SettingsCategory::System,
+            SettingsCategory::Search
+        };
+        const wchar_t* catLabels[] = {L"All", L"Shortcuts", L"System", L"Search"};
+        for (int i = 0; i < 4; ++i) {
+            const auto cat = categories[i];
+            const auto tabRect = CategoryTabRect(cat);
+            const bool active = (settingsCategory_ == cat);
+            const bool tabHover = mouseKnown_ && mouseX_ >= tabRect.left && mouseX_ <= tabRect.right && mouseY_ >= tabRect.top && mouseY_ <= tabRect.bottom;
+            if (active) {
+                Fill(tabRect, highContrast_ ? SystemColor(COLOR_HIGHLIGHT) : D2D1::ColorF(1, 1, 1, 0.12f), 12.0f);
+                brush_->SetColor(highContrast_ ? SystemColor(COLOR_HIGHLIGHTTEXT) : D2D1::ColorF(1, 1, 1, 0.20f));
+                target_->DrawRoundedRectangle(D2D1::RoundedRect(tabRect, 12.0f, 12.0f), brush_.Get(), 1.0f);
+            } else if (tabHover) {
+                Fill(tabRect, D2D1::ColorF(1, 1, 1, 0.06f), 12.0f);
+            }
+            Text(catLabels[i], tabRect, hintFormat_.Get(),
+                active ? (highContrast_ ? SystemColor(COLOR_HIGHLIGHTTEXT) : Foreground()) : (tabHover ? Foreground() : Muted()),
+                DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+
+        // Reset to default button
+        const auto resetRect = ResetButtonRect();
         const bool resetSelected = (settingsSelected_ == 9);
+        const bool resetHover = mouseKnown_ && mouseX_ >= resetRect.left && mouseX_ <= resetRect.right && mouseY_ >= resetRect.top && mouseY_ <= resetRect.bottom;
+        const bool resetHighlight = resetSelected || resetHover;
         Fill(resetRect, highContrast_
-            ? (resetSelected ? SystemColor(COLOR_HIGHLIGHT) : SystemColor(COLOR_BTNFACE))
-            : resetSelected ? D2D1::ColorF(1, 1, 1, 0.12f) : D2D1::ColorF(1, 1, 1, 0.05f), 5.0f);
+            ? (resetHighlight ? SystemColor(COLOR_HIGHLIGHT) : SystemColor(COLOR_BTNFACE))
+            : resetHighlight ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(1, 1, 1, 0.04f), 5.0f);
         brush_->SetColor(highContrast_
-            ? (resetSelected ? SystemColor(COLOR_HIGHLIGHTTEXT) : Foreground())
-            : resetSelected ? D2D1::ColorF(1, 1, 1, 0.25f) : D2D1::ColorF(1, 1, 1, 0.12f));
+            ? (resetHighlight ? SystemColor(COLOR_HIGHLIGHTTEXT) : Foreground())
+            : resetHighlight ? D2D1::ColorF(1, 1, 1, 0.22f) : D2D1::ColorF(1, 1, 1, 0.10f));
         target_->DrawRoundedRectangle(D2D1::RoundedRect(resetRect, 5.0f, 5.0f), brush_.Get(), 1.0f);
         Text(L"Reset to default", resetRect, hintFormat_.Get(),
-            highContrast_ && resetSelected ? SystemColor(COLOR_HIGHLIGHTTEXT) : (resetSelected ? Foreground() : Muted()),
+            highContrast_ && resetHighlight ? SystemColor(COLOR_HIGHLIGHTTEXT) : (resetHighlight ? Foreground() : Muted()),
             DWRITE_TEXT_ALIGNMENT_CENTER);
 
-        Line(1, kSettingsHeaderHeight, width_ - 1, kSettingsHeaderHeight,
-            D2D1::ColorF(1, 1, 1, 0.09f));
-
-        // Fixed footer drawn above scrollable content
+        // Fixed footer drawn above scrollable content (subtle translucent tint - NO BLACK BARS!)
         const float top = FooterTop();
         Fill(D2D1::RectF(1, top, width_ - 1, height_ - 1), highContrast_ ? SystemColor(COLOR_WINDOW) :
-            acrylic_ ? D2D1::ColorF(0x171719, 0.98f) : D2D1::ColorF(0x252527));
-        Fill(D2D1::RectF(1, top, width_ - 1, height_ - 1), D2D1::ColorF(0, 0, 0, 0.10f));
-        Line(1, top, width_ - 1, top, D2D1::ColorF(1, 1, 1, 0.09f));
+            D2D1::ColorF(0, 0, 0, 0.10f));
+        Line(1, top, width_ - 1, top, D2D1::ColorF(1, 1, 1, 0.07f));
         const std::wstring footerMsg = !settingsStatus_.empty() ? settingsStatus_
             : recordingRow_ >= 0
                 ? (recordingRow_ >= 2
@@ -3106,6 +3294,7 @@ private:
     std::wstring composition_, status_, settingsStatus_;
     int selected_ = 0, firstVisible_ = 0, actionSelected_ = 0, wheelDelta_ = 0;
     int settingsSelected_ = 0;
+    SettingsCategory settingsCategory_ = SettingsCategory::All;
     int recordingRow_ = -1;
     float textScroll_ = 0, caretX_ = kTextLeft, mouseX_ = 0, mouseY_ = 0;
     float settingsScroll_ = 0.0f;

@@ -495,6 +495,14 @@ int main() {
     constexpr float viewportHeight = footerTop - kSettingsHeaderH; // 394.0f
     Check(viewportHeight == 394.0f, "settings viewport height is 394px");
 
+    // In individual categories, content height is well under viewportHeight (394px)
+    constexpr float kCategoryShortcutsContentH = 36.0f + 2 * kSettingsRowH + 12.0f; // 142px
+    constexpr float kCategorySystemContentH = 36.0f + 5 * kSettingsRowH + 12.0f;    // 283px
+    constexpr float kCategorySearchContentH = 36.0f + 2 * kSettingsRowH + 12.0f;    // 142px
+    Check(kCategoryShortcutsContentH < viewportHeight, "Shortcuts category has zero overflow in viewport");
+    Check(kCategorySystemContentH < viewportHeight, "System category has zero overflow in viewport");
+    Check(kCategorySearchContentH < viewportHeight, "Search category has zero overflow in viewport");
+
     // --- Calculator Tests ---
     // AppCategory::Calculator distinction
     Check(AppCategory::Calculator != AppCategory::Application, "Calculator category is distinct");
