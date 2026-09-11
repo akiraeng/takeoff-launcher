@@ -313,6 +313,9 @@ private:
         case WM_LBUTTONDOWN:
             HandleClick(ToDip(GET_X_LPARAM(lParam)), ToDip(GET_Y_LPARAM(lParam)));
             return 0;
+        case WM_MBUTTONDOWN:
+            HandleMiddleClick(ToDip(GET_X_LPARAM(lParam)), ToDip(GET_Y_LPARAM(lParam)));
+            return 0;
         case WM_RBUTTONDOWN:
             HandleRightClick(ToDip(GET_X_LPARAM(lParam)), ToDip(GET_Y_LPARAM(lParam)));
             return 0;
@@ -339,6 +342,7 @@ private:
             trackingMouse_ = false;
             mouseKnown_ = false;
             hoverLockRow_ = -1;
+            adminActionHovered_ = false;
             return 0;
         case WM_MOUSEWHEEL:
             if (page_ == Page::Launcher && !actionsOpen_ && !results_.empty()) {
@@ -1140,6 +1144,7 @@ private:
         pendingSurrogate_ = 0;
         composition_.clear();
         actionsOpen_ = false;
+        adminActionHovered_ = false;
         dragging_ = false;
         if (GetCapture() == hwnd_) ReleaseCapture();
         KillTimer(hwnd_, kCaretTimer);
@@ -1746,11 +1751,11 @@ private:
         const wchar_t* dir = workingDir.empty() ? nullptr : workingDir.c_str();
 
         INT_PTR result = reinterpret_cast<INT_PTR>(
-            ShellExecuteW(hwnd_, (asAdministrator && !isProtocol) ? L"runas" : L"open",
+            ShellExecuteW(nullptr, (asAdministrator && !isProtocol) ? L"runas" : L"open",
                 fileToExec, params, dir, SW_SHOWNORMAL));
         if (result <= 32 && asAdministrator && !isProtocol) {
             result = reinterpret_cast<INT_PTR>(
-                ShellExecuteW(hwnd_, L"open", fileToExec, params, dir, SW_SHOWNORMAL));
+                ShellExecuteW(nullptr, L"open", fileToExec, params, dir, SW_SHOWNORMAL));
         }
 
         if (result <= 32) {
@@ -1993,6 +1998,10 @@ private:
             const auto rect = ActionsRect();
             if (x >= rect.left && x <= rect.right && y >= rect.top + 32 && y < rect.bottom - 6) {
                 RunAction(std::clamp(static_cast<int>((y - rect.top - 32) / 36), 0, 2));
+            } else if (PointInAdminAction(x, y)) {
+                actionsOpen_ = false;
+                actionsPositioned_ = false;
+                LaunchSelected(true);
             } else {
                 actionsOpen_ = false;
                 ResetCaret();
@@ -2016,13 +2025,41 @@ private:
                 ShellExecuteW(nullptr, L"open", releasesUrl_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                 return;
             }
-            if (x >= width_ / 2) ToggleActions();
-            else LaunchSelected(true);
+            if (x >= width_ / 2) {
+                ToggleActions();
+            } else if (HasResult()) {
+                const AppEntry& app = apps_[results_[selected_]];
+                if (app.category == takeoff::AppCategory::Calculator) {
+                    CopyText(app.path);
+                    Hide();
+                } else if (!settings_.administratorHotkey.disabled) {
+                    LaunchSelected(true);
+                }
+            }
         } else if (const int result = ResultAtPoint(x, y); result >= 0) {
             selected_ = result;
-            LaunchSelected(false);
+            const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            const bool control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            LaunchSelected(MatchesAdministratorHotkey(control, shift, alt));
         } else if (PointInWebSearchCard(x, y)) {
             OpenWebSearch(input_.text);
+        }
+    }
+
+    void HandleMiddleClick(float x, float y) {
+        SetFocus(hwnd_);
+        hoverLockRow_ = -1;
+        if (page_ != Page::Launcher) return;
+        if (actionsOpen_) {
+            actionsOpen_ = false;
+            actionsPositioned_ = false;
+        }
+        if (const int result = ResultAtPoint(x, y); result >= 0) {
+            selected_ = result;
+            LaunchSelected(true);
+        } else if (y >= FooterTop() && x < width_ / 2) {
+            LaunchSelected(true);
         }
     }
 
@@ -2110,6 +2147,13 @@ private:
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
         }
+        if (page_ == Page::Launcher && HasResult()) {
+            const bool hovered = PointInAdminAction(x, y);
+            if (hovered != adminActionHovered_) {
+                adminActionHovered_ = hovered;
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+        }
         if (actionsOpen_) {
             const auto rect = ActionsRect();
             if (x >= rect.left && x <= rect.right && y >= rect.top + 32 && y < rect.bottom - 6) {
@@ -2136,7 +2180,7 @@ private:
     }
 
     ComPtr<IDWriteTextLayout> Layout(std::wstring_view text, IDWriteTextFormat* format,
-        float width, float height = 64) {
+        float width, float height = 64) const {
         ComPtr<IDWriteTextLayout> layout;
         writeFactory_->CreateTextLayout(text.data(), static_cast<UINT32>(text.size()), format,
             (std::max)(1.0f, width), height, &layout);
@@ -2470,7 +2514,7 @@ private:
         return tokens;
     }
 
-    float KeyBadgeWidth(std::wstring_view token) {
+    float KeyBadgeWidth(std::wstring_view token) const {
         if (token == L"Enter") return 23; // Drawn as a return glyph.
         float width = 22;
         if (auto layout = Layout(token, hintFormat_.Get(), 4096)) {
@@ -2481,7 +2525,7 @@ private:
         return width;
     }
 
-    float KeyPlusWidth() {
+    float KeyPlusWidth() const {
         float width = 16; // "+" glyph plus spacing
         if (auto layout = Layout(L"+", hintFormat_.Get(), 64)) {
             DWRITE_TEXT_METRICS metrics{};
@@ -2491,7 +2535,7 @@ private:
         return width;
     }
 
-    float KeyBadgesWidth(std::wstring_view label) {
+    float KeyBadgesWidth(std::wstring_view label) const {
         float width = 0;
         bool first = true;
         for (const auto token : SplitKeys(label)) {
@@ -2521,13 +2565,16 @@ private:
         return drawn;
     }
 
-    void MouseKey(float x, float y) {
+    void MouseKey(float x, float y, bool hovering = false) {
         const auto rect = D2D1::RectF(x, y, x + 22, y + 22);
-        Fill(rect, highContrast_ ? SystemColor(COLOR_BTNFACE) : D2D1::ColorF(1, 1, 1, 0.065f), 4);
-        const auto color = highContrast_ ? SystemColor(COLOR_BTNTEXT) : Muted();
+        Fill(rect, highContrast_ ? SystemColor(COLOR_BTNFACE)
+            : hovering ? D2D1::ColorF(1, 1, 1, 0.14f) : D2D1::ColorF(1, 1, 1, 0.065f), 4);
+        const auto color = highContrast_ ? SystemColor(COLOR_BTNTEXT)
+            : hovering ? Foreground() : Muted();
         const auto mouse = D2D1::RectF(x + 6, y + 2, x + 16, y + 20);
         Fill(D2D1::RectF(x + 7.2f, y + 3.2f, x + 10.5f, y + 8.4f),
-            highContrast_ ? SystemColor(COLOR_HIGHLIGHT) : D2D1::ColorF(1, 1, 1, 0.95f), 1.4f);
+            highContrast_ ? SystemColor(COLOR_HIGHLIGHT)
+            : hovering ? D2D1::ColorF(0x6EA8FE) : D2D1::ColorF(1, 1, 1, 0.95f), 1.4f);
         brush_->SetColor(color);
         target_->DrawRoundedRectangle(D2D1::RoundedRect(mouse, 5, 5), brush_.Get(), 1.1f);
         Line(x + 6, y + 9, x + 16, y + 9, color, 1.0f);
@@ -2797,6 +2844,19 @@ private:
         return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
     }
 
+    bool PointInAdminAction(float x, float y) const {
+        if (page_ != Page::Launcher || !HasResult()) return false;
+        const AppEntry& app = apps_[results_[selected_]];
+        if (app.category == takeoff::AppCategory::Calculator) return false;
+        if (settings_.administratorHotkey.disabled) return false;
+        const float top = FooterTop();
+        if (y < top || y > height_) return false;
+        const std::wstring adminLabel =
+            quicklaunch::FormatAdminBinding(settings_.administratorHotkey);
+        const float adminWidth = 160.0f + KeyBadgesWidth(adminLabel) + 16.0f + 22.0f + 20.0f;
+        return x >= 20.0f && x <= adminWidth;
+    }
+
     void DrawUpdateIndicator() {
         if (!updateAvailable_) return;
         const auto rect = UpdateIndicatorRect();
@@ -2958,8 +3018,9 @@ private:
                     hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
                 Key(L"\u21B5", 96, top + (kFooterHeight - 22) / 2, 24);
             } else {
+                const bool adminHover = mouseKnown_ && PointInAdminAction(mouseX_, mouseY_);
                 Text(L"Open as Administrator", D2D1::RectF(24, top, 156, height_),
-                    hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
+                    hintFormat_.Get(), (adminHover || actionsOpen_) ? Foreground() : Muted());
                 if (settings_.administratorHotkey.disabled) {
                     Text(L"Disabled", D2D1::RectF(160, top, 286, height_), hintFormat_.Get(), Muted(),
                         DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -2969,7 +3030,7 @@ private:
                     float x = 160 + DrawKeyBadges(adminLabel, 160, top + kFooterHeight / 2);
                     Text(L"/", D2D1::RectF(x + 2, top, x + 16, height_), hintFormat_.Get(), Muted(),
                         DWRITE_TEXT_ALIGNMENT_CENTER);
-                    MouseKey(x + 20, top + 10);
+                    MouseKey(x + 20, top + 10, adminHover);
                 }
             }
         }
@@ -3313,6 +3374,7 @@ private:
     bool updateAvailable_ = false;
     bool updateHovered_ = false;
     bool webSearchCardHovered_ = false;
+    bool adminActionHovered_ = false;
     std::thread updateThread_;
     uint64_t lastUpdateCheck_ = 0;
     std::wstring releasesUrl_ = takeoff::kDefaultReleasesUrl;
