@@ -545,21 +545,6 @@ std::vector<AppEntry> BuildAppIndex() {
         knownFolderPath = nullptr;
     }
 
-    // %USERPROFILE%\Downloads (portable EXEs only)
-    if (SUCCEEDED(SHGetKnownFolderPath(
-            FOLDERID_Downloads, KF_FLAG_DEFAULT, nullptr, &knownFolderPath))) {
-        ScanDirectoryBounded(knownFolderPath, apps, 2, {}, true);
-        CoTaskMemFree(knownFolderPath);
-        knownFolderPath = nullptr;
-    }
-
-    // %USERPROFILE%\Documents (portable EXEs only)
-    if (SUCCEEDED(SHGetKnownFolderPath(
-            FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr, &knownFolderPath))) {
-        ScanDirectoryBounded(knownFolderPath, apps, 3, {}, true);
-        CoTaskMemFree(knownFolderPath);
-        knownFolderPath = nullptr;
-    }
 
     // %USERPROFILE%\Applications
     {

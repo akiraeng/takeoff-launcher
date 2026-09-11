@@ -1109,7 +1109,17 @@ private:
                 }
             }
             std::sort(ranked.begin(), ranked.end(), [this](const RankedResult& a, const RankedResult& b) {
-                return a.score != b.score ? a.score > b.score : apps_[a.appIndex].name < apps_[b.appIndex].name;
+                if (a.score != b.score) return a.score > b.score;
+                const auto& appA = apps_[a.appIndex];
+                const auto& appB = apps_[b.appIndex];
+                const bool authA = (appA.category == takeoff::AppCategory::System ||
+                                    appA.path.rfind(L"shell:AppsFolder", 0) == 0 ||
+                                    (appA.path.size() >= 4 && _wcsicmp(appA.path.c_str() + appA.path.size() - 4, L".lnk") == 0));
+                const bool authB = (appB.category == takeoff::AppCategory::System ||
+                                    appB.path.rfind(L"shell:AppsFolder", 0) == 0 ||
+                                    (appB.path.size() >= 4 && _wcsicmp(appB.path.c_str() + appB.path.size() - 4, L".lnk") == 0));
+                if (authA != authB) return authA > authB;
+                return appA.name < appB.name;
             });
             for (const auto& item : ranked) results_.push_back(item.appIndex);
         }

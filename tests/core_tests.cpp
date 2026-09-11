@@ -41,6 +41,16 @@ int main() {
     Check(MatchScore(L"visual studio code", L"code") > MatchScore(L"barcode scanner", L"code"),
         "word boundary beats inside word");
 
+    // Full-word match in multi-word application title strictly beats partial-word prefix in compound names
+    Check(MatchScore(L"google chrome", L"chrome") > MatchScore(L"chromesetup", L"chrome"),
+        "full word 'chrome' in 'google chrome' beats partial prefix in 'chromesetup'");
+    Check(MatchScore(L"microsoft teams", L"teams") > MatchScore(L"teamssetup", L"teams"),
+        "full word 'teams' in 'microsoft teams' beats partial prefix in 'teamssetup'");
+    Check(MatchScore(L"visual studio code", L"code") > MatchScore(L"codesetup", L"code"),
+        "full word 'code' in 'visual studio code' beats partial prefix in 'codesetup'");
+    Check(MatchScore(L"mozilla firefox", L"firefox") > MatchScore(L"firefoxsetup", L"firefox"),
+        "full word 'firefox' in 'mozilla firefox' beats partial prefix in 'firefoxsetup'");
+
     // Condensed match
     Check(MatchScore(L"vs code", L"vscode") >= 9500, "condensed match");
 

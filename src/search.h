@@ -113,10 +113,8 @@ inline int MatchScore(std::wstring_view name, std::wstring_view query) {
         return 9500;
     }
 
-    if (name.rfind(query, 0) == 0) {
-        return 9000 - static_cast<int>(name.size() - query.size());
-    }
-
+    // Check word boundary matches
+    int bestWordMatch = -1;
     size_t position = 0;
     while ((position = name.find(query, position)) != std::wstring_view::npos) {
         if (position == 0 || name[position - 1] == L' ') {
@@ -124,9 +122,24 @@ inline int MatchScore(std::wstring_view name, std::wstring_view query) {
             for (size_t k = 0; k < position; ++k) {
                 if (name[k] == L' ') ++wordIndex;
             }
-            return 8000 - wordIndex * 20 - static_cast<int>(name.size());
+            const bool isFullWord = (position + query.size() == name.size() ||
+                                     name[position + query.size()] == L' ');
+            int s = 0;
+            if (isFullWord) {
+                s = (position == 0)
+                    ? (9200 - static_cast<int>(name.size() - query.size()))
+                    : (9000 - wordIndex * 20 - static_cast<int>(name.size()));
+            } else {
+                s = (position == 0)
+                    ? (8500 - static_cast<int>(name.size() - query.size()))
+                    : (8000 - wordIndex * 20 - static_cast<int>(name.size()));
+            }
+            if (s > bestWordMatch) bestWordMatch = s;
         }
         ++position;
+    }
+    if (bestWordMatch > 0) {
+        return bestWordMatch;
     }
 
     bool exactAcronym = false;
