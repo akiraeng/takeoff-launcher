@@ -44,7 +44,7 @@ if(BUILD_TESTING)
     add_executable(TakeoffCoreTests tests/core_tests.cpp)
     target_compile_features(TakeoffCoreTests PRIVATE cxx_std_17)
     target_compile_options(TakeoffCoreTests PRIVATE /W4 /permissive- /utf-8)
-    target_link_libraries(TakeoffCoreTests PRIVATE winhttp)
+    target_link_libraries(TakeoffCoreTests PRIVATE winhttp ole32 shell32 shlwapi)
     add_test(NAME TakeoffCoreTests COMMAND TakeoffCoreTests)
 
     # Separate class, mutex, fixture apps, and no global shortcut. Never attaches

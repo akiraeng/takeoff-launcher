@@ -7,12 +7,17 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <shlobj.h>
+#include <shlwapi.h>
+#include <wrl/client.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <cwctype>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace takeoff {
@@ -368,6 +373,113 @@ inline std::wstring UrlEncode(std::wstring_view text) {
     return encoded;
 }
 
+// RAII deleter for CoTaskMemAlloc allocations (strings, PIDLs, known folder paths)
+template <typename T>
+struct CoTaskMemDeleter {
+    void operator()(T* p) const noexcept {
+        if (p) CoTaskMemFree(static_cast<void*>(const_cast<std::remove_cv_t<T>*>(p)));
+    }
+};
+
+template <typename T>
+using CoTaskMemPtr = std::unique_ptr<T, CoTaskMemDeleter<T>>;
+
+// Dedicated RAII holder for Windows Shell PIDLs (ITEMIDLIST UNALIGNED)
+struct PidlDeleter {
+    void operator()(PIDLIST_ABSOLUTE pidl) const noexcept {
+        if (pidl) CoTaskMemFree(pidl);
+    }
+};
+using UniquePidl = std::unique_ptr<ITEMIDLIST UNALIGNED, PidlDeleter>;
+
+// Safely releases STRRET internal allocations without leaking pOleStr
+inline void FreeStrRet(STRRET& str) noexcept {
+    if (str.uType == STRRET_WSTR && str.pOleStr) {
+        CoTaskMemFree(str.pOleStr);
+        str.pOleStr = nullptr;
+    }
+}
+
+// Canonicalize shell:AppsFolder path
+inline std::wstring FormatAppsFolderPath(std::wstring_view parsingName) {
+    if (parsingName.empty()) return {};
+    if (parsingName.rfind(L"shell:AppsFolder\\", 0) == 0 || parsingName.rfind(L"shell:", 0) == 0) {
+        return std::wstring(parsingName);
+    }
+    return L"shell:AppsFolder\\" + std::wstring(parsingName);
+}
+
+inline bool ResolveShellItemParsingName(
+    PIDLIST_ABSOLUTE appsFolderId,
+    IShellFolder* appsFolder,
+    PCUITEMID_CHILD child,
+    std::wstring& outParsingName) {
+    outParsingName.clear();
+    if (!appsFolder || !child) return false;
+
+    // 1. Primary path: Try IShellItem with parent
+    Microsoft::WRL::ComPtr<IShellItem> item;
+    if (SUCCEEDED(SHCreateItemWithParent(appsFolderId, appsFolder, child, IID_PPV_ARGS(&item))) && item) {
+        PWSTR psz = nullptr;
+        if (SUCCEEDED(item->GetDisplayName(SIGDN_PARENTRELATIVEPARSING, &psz)) && psz) {
+            outParsingName = psz;
+            CoTaskMemFree(psz);
+            return true;
+        }
+        if (SUCCEEDED(item->GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING, &psz)) && psz) {
+            outParsingName = psz;
+            CoTaskMemFree(psz);
+            return true;
+        }
+    }
+
+    // 2. Fallback path: Query IShellFolder directly
+    STRRET parseResult{};
+    if (SUCCEEDED(appsFolder->GetDisplayNameOf(child, SHGDN_FORPARSING, &parseResult))) {
+        wchar_t parseBuf[MAX_PATH * 2]{};
+        if (SUCCEEDED(StrRetToBufW(&parseResult, child, parseBuf, static_cast<UINT>(std::size(parseBuf))))) {
+            outParsingName = parseBuf;
+        }
+        FreeStrRet(parseResult);
+        return !outParsingName.empty();
+    }
+
+    return false;
+}
+
+inline std::wstring ResolveShellItemParsingName(
+    IShellFolder* appsFolder,
+    PCUITEMID_CHILD child,
+    IShellItem* existingItem = nullptr) {
+    if (!appsFolder || !child) return {};
+
+    if (existingItem) {
+        PWSTR psz = nullptr;
+        if (SUCCEEDED(existingItem->GetDisplayName(SIGDN_PARENTRELATIVEPARSING, &psz)) && psz) {
+            std::wstring result(psz);
+            CoTaskMemFree(psz);
+            return result;
+        }
+        if (SUCCEEDED(existingItem->GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING, &psz)) && psz) {
+            std::wstring result(psz);
+            CoTaskMemFree(psz);
+            return result;
+        }
+    }
+
+    STRRET parseResult{};
+    if (SUCCEEDED(appsFolder->GetDisplayNameOf(child, SHGDN_FORPARSING, &parseResult))) {
+        wchar_t parseBuf[MAX_PATH * 2]{};
+        std::wstring result;
+        if (SUCCEEDED(StrRetToBufW(&parseResult, child, parseBuf, static_cast<UINT>(std::size(parseBuf))))) {
+            result = parseBuf;
+        }
+        FreeStrRet(parseResult);
+        return result;
+    }
+
+    return {};
+}
 
 } // namespace takeoff
 

@@ -192,26 +192,32 @@ void ScanDirectory(const fs::path& root, std::vector<AppEntry>& apps) {
 }
 
 void ScanAppsFolder(std::vector<AppEntry>& apps) {
-    PIDLIST_ABSOLUTE appsFolderId = nullptr;
+    PIDLIST_ABSOLUTE rawAppsFolderId = nullptr;
     if (FAILED(SHGetKnownFolderIDList(
-            FOLDERID_AppsFolder, KF_FLAG_DEFAULT, nullptr, &appsFolderId))) return;
-    IShellFolder* appsFolder = nullptr;
-    if (FAILED(SHBindToObject(
-            nullptr, appsFolderId, nullptr, IID_PPV_ARGS(&appsFolder)))) {
-        CoTaskMemFree(appsFolderId);
+            FOLDERID_AppsFolder, KF_FLAG_DEFAULT, nullptr, &rawAppsFolderId)) || !rawAppsFolderId) {
         return;
     }
-    IEnumIDList* enumerator = nullptr;
+    takeoff::UniquePidl appsFolderId(rawAppsFolderId);
+
+    ComPtr<IShellFolder> appsFolder;
+    if (FAILED(SHBindToObject(
+            nullptr, appsFolderId.get(), nullptr, IID_PPV_ARGS(&appsFolder))) || !appsFolder) {
+        return;
+    }
+
+    ComPtr<IEnumIDList> enumerator;
     if (SUCCEEDED(appsFolder->EnumObjects(
-            nullptr, SHCONTF_FOLDERS | SHCONTF_NONFOLDERS | SHCONTF_STORAGE | SHCONTF_FASTITEMS, &enumerator))) {
-        PITEMID_CHILD child = nullptr;
-        while (enumerator->Next(1, &child, nullptr) == S_OK) {
+            nullptr, SHCONTF_FOLDERS | SHCONTF_NONFOLDERS | SHCONTF_STORAGE | SHCONTF_FASTITEMS, &enumerator)) && enumerator) {
+        PITEMID_CHILD rawChild = nullptr;
+        while (enumerator->Next(1, &rawChild, nullptr) == S_OK && rawChild) {
+            takeoff::UniquePidl child(rawChild);
+
             STRRET displayNameResult{};
             wchar_t displayName[MAX_PATH]{};
             if (SUCCEEDED(appsFolder->GetDisplayNameOf(
-                    child, SHGDN_NORMAL, &displayNameResult)) &&
-                SUCCEEDED(StrRetToBufW(
-                    &displayNameResult, child, displayName, MAX_PATH))) {
+                    child.get(), SHGDN_NORMAL, &displayNameResult))) {
+                StrRetToBufW(&displayNameResult, child.get(), displayName, MAX_PATH);
+                takeoff::FreeStrRet(displayNameResult);
 
                 if (displayName[0] == L'@' || wcsstr(displayName, L"ms-resource:") == displayName) {
                     wchar_t resolved[MAX_PATH]{};
@@ -221,40 +227,12 @@ void ScanAppsFolder(std::vector<AppEntry>& apps) {
                 }
 
                 if (displayName[0] == L'@' || wcsstr(displayName, L"ms-resource:") == displayName || displayName[0] == L'\0') {
-                    CoTaskMemFree(child);
-                    child = nullptr;
                     continue;
                 }
 
-                PWSTR parsingName = nullptr;
-                IShellItem* item = nullptr;
-                if (SUCCEEDED(SHCreateItemWithParent(
-                        appsFolderId, appsFolder, child, IID_PPV_ARGS(&item)))) {
-                    if (FAILED(item->GetDisplayName(SIGDN_PARENTRELATIVEPARSING, &parsingName))) {
-                        item->GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING, &parsingName);
-                    }
-                    item->Release();
-                }
-                if (!parsingName) {
-                    STRRET parseResult{};
-                    if (SUCCEEDED(appsFolder->GetDisplayNameOf(child, SHGDN_FORPARSING, &parseResult))) {
-                        wchar_t parseBuf[MAX_PATH * 2]{};
-                        if (SUCCEEDED(StrRetToBufW(&parseResult, child, parseBuf, static_cast<UINT>(std::size(parseBuf))))) {
-                            parsingName = _wcsdup(parseBuf);
-                        }
-                    }
-                }
-
-                if (parsingName) {
-                    std::wstring pName(parsingName);
-                    if (item) CoTaskMemFree(parsingName); else free(parsingName);
-
-                    std::wstring fullPath;
-                    if (pName.rfind(L"shell:AppsFolder\\", 0) == 0 || pName.rfind(L"shell:", 0) == 0) {
-                        fullPath = std::move(pName);
-                    } else {
-                        fullPath = L"shell:AppsFolder\\" + pName;
-                    }
+                std::wstring parsingName;
+                if (takeoff::ResolveShellItemParsingName(appsFolderId.get(), appsFolder.Get(), child.get(), parsingName)) {
+                    std::wstring fullPath = takeoff::FormatAppsFolderPath(parsingName);
 
                     std::wstring name(displayName);
                     while (!name.empty() && (name.back() == L' ' || name.back() == L'\t')) name.pop_back();
@@ -267,13 +245,8 @@ void ScanAppsFolder(std::vector<AppEntry>& apps) {
                     }
                 }
             }
-            CoTaskMemFree(child);
-            child = nullptr;
         }
-        enumerator->Release();
     }
-    appsFolder->Release();
-    CoTaskMemFree(appsFolderId);
 }
 
 void AddSystemItems(std::vector<AppEntry>& apps) {
