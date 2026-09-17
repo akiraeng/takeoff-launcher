@@ -1,10 +1,13 @@
 #pragma once
 
+#include "websearch.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <cwctype>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace takeoff {
 
@@ -39,7 +42,8 @@ struct Settings {
     bool showTrayIcon = true;
     bool checkForUpdates = true;
     bool enableFileSearch = true;
-    bool enableWebSearch = true;
+    std::vector<SearchEngine> searchEngines = DefaultSearchEngines();
+    int defaultEngine = 0;  // Last engine used; also the one the launcher starts with.
 };
 
 inline std::wstring KeyName(uint16_t vk) {

@@ -8,6 +8,7 @@ add_executable(${target} WIN32
     src/file_index.h
     src/search.h
     src/settings.h
+    src/websearch.h
     src/updates.h
     src/calculator.h
     src/Takeoff.manifest

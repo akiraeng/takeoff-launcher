@@ -1,5 +1,6 @@
 #include "../src/search.h"
 #include "../src/settings.h"
+#include "../src/websearch.h"
 #include "../src/updates.h"
 #include "../src/file_index.h"
 #include "../src/calculator.h"
@@ -442,9 +443,12 @@ int main() {
     Check(defaultSettings.enableFileSearch == true, "file search enabled by default in settings");
     defaultSettings.enableFileSearch = false;
     Check(!defaultSettings.enableFileSearch, "file search toggle can be disabled");
-    Check(defaultSettings.enableWebSearch == true, "web search enabled by default in settings");
-    defaultSettings.enableWebSearch = false;
-    Check(!defaultSettings.enableWebSearch, "web search toggle can be disabled");
+    Check(defaultSettings.searchEngines.size() == 3, "three preset search engines by default");
+    Check(defaultSettings.searchEngines[0].keyword == L"d", "first preset engine keyword is d");
+    Check(defaultSettings.searchEngines[1].keyword == L"yt", "second preset engine keyword is yt");
+    Check(defaultSettings.defaultEngine == 0, "default engine index starts at 0");
+    defaultSettings.searchEngines.clear();
+    Check(defaultSettings.searchEngines.empty(), "emptying the engine list disables web search");
 
     // UrlEncode tests
     Check(UrlEncode(L"").empty(), "UrlEncode empty string");
@@ -458,6 +462,46 @@ int main() {
     Check(Normalize(L"   ").empty(), "whitespace query normalizes to empty");
     Check(Normalize(L"\t \r\n ").empty(), "whitespace query normalizes to empty");
     Check(!Normalize(L"google search").empty(), "valid search query normalizes to non-empty");
+
+    // Search engine helpers
+    Check(ExtractHostname(L"https://duckduckgo.com/?q={query}") == L"duckduckgo.com",
+        "host extracted from a template");
+    Check(ExtractHostname(L"https://www.youtube.com/results?search_query={query}") == L"www.youtube.com",
+        "host extracted with a path");
+    Check(ExtractHostname(L"not a url") == L"web", "host-less url falls back to web");
+    Check(IsUsableEngineUrl(L"https://duckduckgo.com/?q={query}"), "https template is usable");
+    Check(!IsUsableEngineUrl(L"https://"), "bare scheme is not a usable engine url");
+    Check(!IsUsableEngineUrl(L"duckduckgo.com"), "url without a scheme is not usable");
+
+    const std::vector<SearchEngine> presets = DefaultSearchEngines();
+    Check(presets.size() == 3 && presets.size() <= kMaxSearchEngines,
+        "presets fit within the engine cap");
+    Check(BuildSearchUrl(presets[0], L"hello world") ==
+        L"https://duckduckgo.com/?q=hello+world", "query substituted into the template");
+    Check(BuildSearchUrl({{}, {}, L"https://x.test/s={query}&extra={query}"}, L"a b") ==
+        L"https://x.test/s=a+b&extra=a+b", "every placeholder is substituted");
+    Check(BuildSearchUrl({{}, {}, L"https://x.test/s"}, L"a b") == L"https://x.test/sa+b",
+        "query appended when the template has no placeholder");
+
+    const ParsedEngineQuery bare = ParseKeywordQuery(presets, L"d");
+    Check(bare.engineIndex == -1, "a bare keyword is not web intent");
+    const ParsedEngineQuery spaced = ParseKeywordQuery(presets, L"d  cats  ");
+    Check(spaced.engineIndex == 0, "keyword prefix selects the engine");
+    Check(spaced.query == L"cats  ", "query keeps trailing text after the keyword");
+    const ParsedEngineQuery plain = ParseKeywordQuery(presets, L"just text");
+    Check(plain.engineIndex == -1 && plain.query == L"just text", "no keyword keeps the full text");
+    const ParsedEngineQuery unknown = ParseKeywordQuery(presets, L"zz cats");
+    Check(unknown.engineIndex == -1, "unknown keyword is not web intent");
+    Check(ParseKeywordQuery({}, L"d cats").engineIndex == -1, "no engines means no keyword match");
+
+    SearchEngine edited;
+    NormalizeEditedEngine(edited, L"  Trimmed  ", L" g o ", L"  https://g.test/?q={query}  ");
+    Check(edited.name == L"Trimmed", "engine name is trimmed");
+    Check(edited.keyword == L"go", "spaces are stripped from the keyword");
+    Check(edited.url == L"https://g.test/?q={query}", "engine url is trimmed");
+    SearchEngine unnamed;
+    NormalizeEditedEngine(unnamed, L"", L"", L"https://duckduckgo.com/?q={query}");
+    Check(unnamed.name == L"duckduckgo.com", "missing name falls back to the url host");
 
     // 4. Zero-query app-only invariant:
     // When input query is empty, FileIndex returns 0 results.
