@@ -1184,13 +1184,14 @@ private:
         }
     }
 
-    enum class SettingsCategory : uint8_t { All, Shortcuts, System, Search };
+    enum class SettingsCategory : uint8_t { All, Shortcuts, System, Search, About };
 
     static bool IsRowInCategory(int row, SettingsCategory cat) {
-        if (cat == SettingsCategory::All) return row >= 0 && row <= 8;
+        if (cat == SettingsCategory::All) return row >= 0 && row <= 9;
         if (cat == SettingsCategory::Shortcuts) return row >= 0 && row <= 3;
         if (cat == SettingsCategory::System) return row >= 4 && row <= 6;
         if (cat == SettingsCategory::Search) return row >= 7 && row <= 8;
+        if (cat == SettingsCategory::About) return row == 9;
         return false;
     }
 
@@ -1198,6 +1199,7 @@ private:
         if (cat == SettingsCategory::Shortcuts) return 0;
         if (cat == SettingsCategory::System) return 4;
         if (cat == SettingsCategory::Search) return 7;
+        if (cat == SettingsCategory::About) return 9;
         return 0;
     }
 
@@ -1205,17 +1207,20 @@ private:
         if (cat == SettingsCategory::Shortcuts) return 3;
         if (cat == SettingsCategory::System) return 6;
         if (cat == SettingsCategory::Search) return 8;
-        return 8;
+        if (cat == SettingsCategory::About) return 9;
+        return 9;
     }
+
+    static constexpr int kResetButtonRow = 10;
 
     int NextSettingsRow(int current, int delta) const {
         std::vector<int> activeRows;
-        for (int r = 0; r <= 8; ++r) {
+        for (int r = 0; r <= 9; ++r) {
             if (IsRowInCategory(r, settingsCategory_)) {
                 activeRows.push_back(r);
             }
         }
-        activeRows.push_back(9);
+        activeRows.push_back(kResetButtonRow);
         auto it = std::find(activeRows.begin(), activeRows.end(), current);
         if (it == activeRows.end()) {
             return activeRows.empty() ? 0 : activeRows.front();
@@ -1240,6 +1245,9 @@ private:
         } else if (cat == SettingsCategory::Search) {
             x = 160.0f + 40.0f + 6.0f + 82.0f + 6.0f + 68.0f + 6.0f;
             w = 68.0f;
+        } else if (cat == SettingsCategory::About) {
+            x = 160.0f + 40.0f + 6.0f + 82.0f + 6.0f + 68.0f + 6.0f + 68.0f + 6.0f;
+            w = 56.0f;
         }
         return D2D1::RectF(x, y, x + w, y + h);
     }
@@ -1250,13 +1258,15 @@ private:
 
     float SettingsContentBottom() const {
         if (settingsCategory_ == SettingsCategory::All) {
-            return 551.0f;
+            return 636.0f;
         } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
             return 240.0f;
         } else if (settingsCategory_ == SettingsCategory::System) {
             return 193.0f;
         } else if (settingsCategory_ == SettingsCategory::Search) {
             return 146.0f;
+        } else if (settingsCategory_ == SettingsCategory::About) {
+            return 100.0f;
         }
         return 200.0f;
     }
@@ -1277,13 +1287,16 @@ private:
         if (settingsCategory_ == SettingsCategory::All) {
             if (row < 4) return 36.0f + row * kSettingsRowHeight;
             if (row < 7) return 262.0f + (row - 4) * kSettingsRowHeight;
-            return 441.0f + (row - 7) * kSettingsRowHeight;
+            if (row < 9) return 441.0f + (row - 7) * kSettingsRowHeight;
+            return 574.0f + (row - 9) * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
             return 36.0f + row * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::System) {
             return 36.0f + (row - 4) * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::Search) {
             return 36.0f + (row - 7) * kSettingsRowHeight;
+        } else if (settingsCategory_ == SettingsCategory::About) {
+            return 36.0f + (row - 9) * kSettingsRowHeight;
         }
         return 0.0f;
     }
@@ -1292,7 +1305,7 @@ private:
         if (x < 16.0f || x > width_ - 16.0f) return -1;
         if (y < kSettingsHeaderHeight || y >= FooterTop()) return -1;
         const float contentY = (y - kSettingsHeaderHeight) + settingsScroll_;
-        for (int r = 0; r <= 8; ++r) {
+        for (int r = 0; r <= 9; ++r) {
             if (!IsRowInCategory(r, settingsCategory_)) continue;
             const float rTop = SettingsRowTop(r);
             if (contentY >= rTop && contentY < rTop + kSettingsRowHeight) {
@@ -1312,11 +1325,11 @@ private:
     }
 
     void EnsureSettingsVisible(int row) {
-        if (row == 9) {
+        if (row == kResetButtonRow) {
             settingsScroll_ = 0.0f;
             return;
         }
-        if (row < 0 || row > 8 || !IsRowInCategory(row, settingsCategory_)) return;
+        if (row < 0 || row > 9 || !IsRowInCategory(row, settingsCategory_)) return;
         const float rTop = SettingsRowTop(row);
         const float rBottom = rTop + kSettingsRowHeight;
         const float maxScroll = SettingsMaxScroll();
@@ -1325,8 +1338,9 @@ private:
             if (row == 0) sectionHeaderTop = 16.0f;
             else if (row == 4) sectionHeaderTop = 242.0f;
             else if (row == 7) sectionHeaderTop = 421.0f;
+            else if (row == 9) sectionHeaderTop = 554.0f;
         } else {
-            if (row == 0 || row == 4 || row == 7) sectionHeaderTop = 16.0f;
+            if (row == 0 || row == 4 || row == 7 || row == 9) sectionHeaderTop = 16.0f;
         }
         const float visibleTop = sectionHeaderTop;
         const float visibleBottom = rBottom + 8.0f;
@@ -1561,7 +1575,7 @@ private:
 
     void ChangeSetting(int row) {
         settingsStatus_.clear();
-        if (row == 9) {
+        if (row == kResetButtonRow) {
             ResetToDefaults();
             return;
         }
@@ -1602,6 +1616,10 @@ private:
             break;
         case 8:
             OpenEnginesPage();
+            break;
+        case 9:
+            ShellExecuteW(nullptr, L"open", takeoff::kGitHubRepoUrl, nullptr, nullptr, SW_SHOWNORMAL);
+            settingsStatus_ = L"Opened GitHub project in browser";
             break;
         }
         InvalidateRect(hwnd_, nullptr, FALSE);
@@ -2810,7 +2828,8 @@ private:
                     SettingsCategory::All,
                     SettingsCategory::Shortcuts,
                     SettingsCategory::System,
-                    SettingsCategory::Search
+                    SettingsCategory::Search,
+                    SettingsCategory::About
                 };
                 for (auto cat : categories) {
                     const auto r = CategoryTabRect(cat);
@@ -2826,7 +2845,7 @@ private:
                 }
                 const auto resetRect = ResetButtonRect();
                 if (x >= resetRect.left && x <= resetRect.right && y >= resetRect.top && y <= resetRect.bottom) {
-                    settingsSelected_ = 9;
+                    settingsSelected_ = kResetButtonRow;
                     ResetToDefaults();
                     return;
                 }
@@ -3039,7 +3058,7 @@ private:
             int row = -1;
             if (y < kSettingsHeaderHeight) {
                 if (x >= resetRect.left && x <= resetRect.right && y >= resetRect.top && y <= resetRect.bottom) {
-                    row = 9;
+                    row = kResetButtonRow;
                 }
             } else if (y >= kSettingsHeaderHeight && y < FooterTop() && x < width_ - 14.0f) {
                 row = SettingsRowAtPoint(x, y);
@@ -3728,11 +3747,15 @@ private:
             const std::wstring hint = !indexReady_
                 ? L"Your Start Menu and installed apps will appear here."
                 : (queryEngine_ >= 0)
-                    ? L"Press Enter to open in your browser."
+                    ? (settings_.searchEngines.size() > 1
+                        ? L"Press Enter to open in your browser \u00B7 Tab to switch search engine."
+                        : L"Press Enter to open in your browser.")
                     : !hasQuery
                         ? L"Apps from your Start Menu appear here."
                         : hasSearchableText && QueryEngine() != nullptr
-                            ? L"Press Enter to search the web."
+                            ? (settings_.searchEngines.size() > 1
+                                ? L"Press Enter to search the web \u00B7 Tab to switch search engine."
+                                : L"Press Enter to search the web.")
                             : L"Try a shorter name, or press Esc to clear your search.";
             Text(hint, D2D1::RectF(32.0f, center + 20.0f, width_ - 32.0f, center + 48.0f), hintFormat_.Get(),
                 Muted(), DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -4285,6 +4308,24 @@ private:
             }
         }
 
+        if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::About) {
+            const float hY = (settingsCategory_ == SettingsCategory::All) ? 554.0f : 16.0f;
+            const float cY = (settingsCategory_ == SettingsCategory::All) ? 574.0f : 36.0f;
+            drawCard(L"ABOUT", hY, cY, 1);
+
+            DrawSettingsRow(9, cY + offsetY, L"GitHub project",
+                L"Open repository to submit pull requests, report bugs, or contribute");
+            {
+                const float rowTop = cY + offsetY;
+                const bool selected = (settingsSelected_ == 9);
+                Text(L"github.com/akiraeng/takeoff-launcher \u2197",
+                    D2D1::RectF(width_ - 360, rowTop + 4, width_ - 36, rowTop + 26),
+                    hintFormat_.Get(),
+                    highContrast_ && selected ? SystemColor(COLOR_HIGHLIGHTTEXT) : D2D1::ColorF(0x6EA8FE),
+                    DWRITE_TEXT_ALIGNMENT_TRAILING);
+            }
+        }
+
         target_->PopAxisAlignedClip();
 
         // Subtle modern scrollbar thumb if content exceeds viewport
@@ -4337,10 +4378,11 @@ private:
                 SettingsCategory::All,
                 SettingsCategory::Shortcuts,
                 SettingsCategory::System,
-                SettingsCategory::Search
+                SettingsCategory::Search,
+                SettingsCategory::About
             };
-            const wchar_t* catLabels[] = {L"All", L"Shortcuts", L"System", L"Search"};
-            for (int i = 0; i < 4; ++i) {
+            const wchar_t* catLabels[] = {L"All", L"Shortcuts", L"System", L"Search", L"About"};
+            for (int i = 0; i < 5; ++i) {
                 const auto cat = categories[i];
                 const auto tabRect = CategoryTabRect(cat);
                 const bool active = (settingsCategory_ == cat);
@@ -4360,7 +4402,7 @@ private:
 
         // Reset to default button
         const auto resetRect = ResetButtonRect();
-        const bool resetSelected = !enginesPage_ && (settingsSelected_ == 9);
+        const bool resetSelected = !enginesPage_ && (settingsSelected_ == kResetButtonRow);
         const bool resetHover = mouseKnown_ && mouseX_ >= resetRect.left && mouseX_ <= resetRect.right && mouseY_ >= resetRect.top && mouseY_ <= resetRect.bottom;
         const bool resetHighlight = resetSelected || resetHover;
         Fill(resetRect, highContrast_

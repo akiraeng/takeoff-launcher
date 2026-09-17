@@ -36,6 +36,8 @@
   dev man  → Device Manager
   ```
 * **System Tools Included** — Instantly launch Control Panel applets, Windows Settings, Device Manager, and Services alongside desktop apps.
+* **Web Search with Keywords** — Search the web directly from the search bar using simple engine shortcuts (such as `g` for Google, `d` for DuckDuckGo, `yt` for YouTube, `b` for Bing, `gh` for GitHub, or `w` for Wikipedia). Press `Tab` to switch search engines. You can also add, edit, or reorder custom search engines in Settings.
+* **Power and System Commands** — Control your PC directly from search. Includes commands for Shut Down, Restart, Sleep, Hibernate, Lock, and Sign Out, along with common aliases like `reboot` and `power off`.
 * **Built-in Calculator** — Instantly evaluate mathematical expressions (e.g. `125 * 8`, `sqrt(144)`, `2^10`, `(10 + 20) * 3`). Press `Enter` to copy the result to the clipboard and close, or `Ctrl+C` to copy directly.
 * **Keyboard-First** — Launch, elevate to admin (`Ctrl+Enter`), and trigger quick-launch slots (`Alt+1`–`8`) without touching your mouse.
 * **Privacy First** — Zero telemetry, zero analytics, and zero background services. Search history is never written to disk.
@@ -47,7 +49,8 @@
 | Shortcut | Action |
 | --- | --- |
 | `Alt+Space` | Open or dismiss Takeoff |
-| `Enter` | Launch application or copy calculation result |
+| `Enter` | Launch application, open web search, run power command, or copy calculation result |
+| `Tab` | Switch active web search engine |
 | `Ctrl+Enter` | Run as administrator |
 | `Alt+1` ... `Alt+8` | Quick-launch visible result |
 | `Ctrl+C` | Copy selected text or calculation result |
