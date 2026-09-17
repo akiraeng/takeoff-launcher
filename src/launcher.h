@@ -109,12 +109,45 @@ private:
         ComPtr<ID2D1Bitmap> bitmap;
     };
 
+    static inline LauncherWindow* s_instance_ = nullptr;
+    static inline HHOOK mouseHook_ = nullptr;
+    static inline HWINEVENTHOOK winEventHook_ = nullptr;
+
+    static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
+        if (nCode >= 0 && s_instance_ && s_instance_->hwnd_ &&
+            !s_instance_->showing_ && IsWindowVisible(s_instance_->hwnd_)) {
+            if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN ||
+                wParam == WM_NCLBUTTONDOWN || wParam == WM_NCRBUTTONDOWN ||
+                wParam == WM_MBUTTONDOWN || wParam == WM_NCMBUTTONDOWN) {
+                auto* mouse = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
+                if (mouse) {
+                    RECT rc{};
+                    GetWindowRect(s_instance_->hwnd_, &rc);
+                    if (!PtInRect(&rc, mouse->pt)) {
+                        s_instance_->Hide();
+                    }
+                }
+            }
+        }
+        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+    }
+
+    static void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
+                                      LONG, LONG, DWORD, DWORD) {
+        if (event == EVENT_SYSTEM_FOREGROUND && s_instance_ && s_instance_->hwnd_) {
+            if (!s_instance_->showing_ && IsWindowVisible(s_instance_->hwnd_) && hwnd != s_instance_->hwnd_) {
+                s_instance_->Hide();
+            }
+        }
+    }
+
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
         LauncherWindow* self = reinterpret_cast<LauncherWindow*>(
             GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         if (message == WM_NCCREATE) {
             self = static_cast<LauncherWindow*>(reinterpret_cast<CREATESTRUCTW*>(lParam)->lpCreateParams);
             self->hwnd_ = hwnd;
+            s_instance_ = self;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
         }
         return self ? self->HandleMessage(message, wParam, lParam)
@@ -130,6 +163,9 @@ private:
         case WM_NCPAINT:
             return 0;
         case WM_NCACTIVATE:
+            if (!wParam) {
+                if (!showing_ && IsWindowVisible(hwnd_)) Hide();
+            }
             return DefWindowProcW(hwnd_, WM_NCACTIVATE, wParam, -1);
         case WM_ERASEBKGND:
             return 1;
@@ -238,10 +274,17 @@ private:
             return 0;
         }
         case WM_MOUSEACTIVATE:
+            SetForegroundWindow(hwnd_);
+            SetFocus(hwnd_);
             return MA_ACTIVATE;
+        case WM_ACTIVATEAPP:
+            if (!wParam) {
+                if (!showing_ && IsWindowVisible(hwnd_)) Hide();
+            }
+            return 0;
         case WM_ACTIVATE:
             if (LOWORD(wParam) == WA_INACTIVE) {
-                if (IsWindowVisible(hwnd_)) Hide();
+                if (!showing_ && IsWindowVisible(hwnd_)) Hide();
             } else {
                 SetFocus(hwnd_);
                 ResetCaret();
@@ -256,6 +299,12 @@ private:
         case WM_KILLFOCUS:
             KillTimer(hwnd_, kCaretTimer);
             DestroyCaret();
+            if (!showing_ && IsWindowVisible(hwnd_)) {
+                HWND newFocus = reinterpret_cast<HWND>(wParam);
+                if (newFocus != hwnd_) {
+                    Hide();
+                }
+            }
             return 0;
         case WM_TIMER:
             if (wParam == kRenderRetryTimer) {
@@ -364,12 +413,18 @@ private:
             }
             return 0;
         case WM_LBUTTONDOWN:
+            if (GetForegroundWindow() != hwnd_) SetForegroundWindow(hwnd_);
+            if (GetFocus() != hwnd_) SetFocus(hwnd_);
             HandleClick(ToDip(GET_X_LPARAM(lParam)), ToDip(GET_Y_LPARAM(lParam)));
             return 0;
         case WM_MBUTTONDOWN:
+            if (GetForegroundWindow() != hwnd_) SetForegroundWindow(hwnd_);
+            if (GetFocus() != hwnd_) SetFocus(hwnd_);
             HandleMiddleClick(ToDip(GET_X_LPARAM(lParam)), ToDip(GET_Y_LPARAM(lParam)));
             return 0;
         case WM_RBUTTONDOWN:
+            if (GetForegroundWindow() != hwnd_) SetForegroundWindow(hwnd_);
+            if (GetFocus() != hwnd_) SetFocus(hwnd_);
             HandleRightClick(ToDip(GET_X_LPARAM(lParam)), ToDip(GET_Y_LPARAM(lParam)));
             return 0;
         case WM_RBUTTONUP:
@@ -511,6 +566,15 @@ private:
             KillTimer(hwnd_, kRenderRetryTimer);
             KillTimer(hwnd_, kTrimTimer);
             if (hotkeyRegistered_) UnregisterHotKey(hwnd_, kHotkeyId);
+            if (mouseHook_) {
+                UnhookWindowsHookEx(mouseHook_);
+                mouseHook_ = nullptr;
+            }
+            if (winEventHook_) {
+                UnhookWinEvent(winEventHook_);
+                winEventHook_ = nullptr;
+            }
+            if (s_instance_ == this) s_instance_ = nullptr;
             RemoveTrayIcon();
             PostQuitMessage(0);
             return 0;
@@ -1111,28 +1175,69 @@ private:
 
     void ForceForeground() {
         if (!hwnd_) return;
+
+        SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        BringWindowToTop(hwnd_);
+
         const HWND foreHwnd = GetForegroundWindow();
+        if (foreHwnd == hwnd_ && GetFocus() == hwnd_) {
+            return;
+        }
+
         const DWORD foreThread = foreHwnd ? GetWindowThreadProcessId(foreHwnd, nullptr) : 0;
         const DWORD appThread = GetCurrentThreadId();
 
         LockSetForegroundWindow(LSFW_UNLOCK);
+        AllowSetForegroundWindow(ASFW_ANY);
+
+        DWORD oldTimeout = 0;
+        SystemParametersInfoW(SPI_GETFOREGROUNDLOCKTIMEOUT, 0, &oldTimeout, 0);
+        SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, (PVOID)0, SPIF_SENDCHANGE);
+
+        // Synthesize an Alt key event so Windows recognizes active user interaction
+        keybd_event(VK_MENU, 0, 0, 0);
+        keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+
+        bool attachedFore = false;
         if (foreThread && foreThread != appThread) {
-            AttachThreadInput(foreThread, appThread, TRUE);
-            SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-            BringWindowToTop(hwnd_);
-            SetForegroundWindow(hwnd_);
-            AttachThreadInput(foreThread, appThread, FALSE);
-        } else {
-            SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-            BringWindowToTop(hwnd_);
-            SetForegroundWindow(hwnd_);
+            attachedFore = (AttachThreadInput(appThread, foreThread, TRUE) != FALSE);
+        }
+
+        SetForegroundWindow(hwnd_);
+        BringWindowToTop(hwnd_);
+        SetActiveWindow(hwnd_);
+        SetFocus(hwnd_);
+
+        if (attachedFore) {
+            AttachThreadInput(appThread, foreThread, FALSE);
         }
 
         if (GetForegroundWindow() != hwnd_) {
-            keybd_event(0, 0, 0, 0);
+            HWND shellHwnd = GetShellWindow();
+            if (shellHwnd) {
+                DWORD shellThread = GetWindowThreadProcessId(shellHwnd, nullptr);
+                if (shellThread && shellThread != appThread) {
+                    AttachThreadInput(appThread, shellThread, TRUE);
+                    SetForegroundWindow(hwnd_);
+                    BringWindowToTop(hwnd_);
+                    SetActiveWindow(hwnd_);
+                    SetFocus(hwnd_);
+                    AttachThreadInput(appThread, shellThread, FALSE);
+                }
+            }
+        }
+
+        SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, (PVOID)(uintptr_t)oldTimeout, SPIF_SENDCHANGE);
+
+        for (int attempt = 0; attempt < 3 && GetForegroundWindow() != hwnd_; ++attempt) {
+            keybd_event(VK_MENU, 0, 0, 0);
+            keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
             SetForegroundWindow(hwnd_);
+            SetActiveWindow(hwnd_);
+            SetFocus(hwnd_);
+            if (GetForegroundWindow() == hwnd_) break;
+            Sleep(5);
         }
 
         SetActiveWindow(hwnd_);
@@ -1140,6 +1245,7 @@ private:
     }
 
     void Show() {
+        showing_ = true;
         KillTimer(hwnd_, kTrimTimer);
         page_ = Page::Launcher;
         hotkeyWarningDismissed_ = false;
@@ -1175,6 +1281,18 @@ private:
         ShowWindow(hwnd_, SW_SHOWNORMAL);
         ForceForeground();
         ResetCaret();
+        if (!mouseHook_) {
+            s_instance_ = this;
+            mouseHook_ = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc, GetModuleHandleW(nullptr), 0);
+        }
+        if (!winEventHook_) {
+            s_instance_ = this;
+            winEventHook_ = SetWinEventHook(
+                EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
+                nullptr, WinEventProc,
+                0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        }
+        showing_ = false;
         if constexpr (!kUiTest) {
             const auto now = std::chrono::steady_clock::now();
             if (lastIndexTime_.time_since_epoch().count() > 0 &&
@@ -1421,6 +1539,14 @@ private:
         queryEngine_ = -1;
         webQuery_.clear();
         if (GetCapture() == hwnd_) ReleaseCapture();
+        if (mouseHook_) {
+            UnhookWindowsHookEx(mouseHook_);
+            mouseHook_ = nullptr;
+        }
+        if (winEventHook_) {
+            UnhookWinEvent(winEventHook_);
+            winEventHook_ = nullptr;
+        }
         KillTimer(hwnd_, kCaretTimer);
         ShowWindow(hwnd_, SW_HIDE);
         // After a while hidden, release idle pages so the resident process
@@ -4653,6 +4779,7 @@ private:
     }
 
     HWND hwnd_ = nullptr;
+    bool showing_ = false;
     UINT dpi_ = 96;
     float width_ = kWidth;
     float height_ = 482;
