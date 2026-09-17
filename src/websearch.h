@@ -35,14 +35,17 @@ inline constexpr wchar_t kEnginesRegistryKey[] = L"Software\\Takeoff\\SearchEngi
 
 inline std::vector<SearchEngine> DefaultSearchEngines() {
     return {
+        {L"Google", L"g", L"https://www.google.com/search?q={query}"},
         {L"DuckDuckGo", L"d", L"https://duckduckgo.com/?q={query}"},
         {L"YouTube", L"yt", L"https://www.youtube.com/results?search_query={query}"},
         {L"Bing", L"b", L"https://www.bing.com/search?q={query}"},
+        {L"GitHub", L"gh", L"https://github.com/search?q={query}"},
+        {L"Wikipedia", L"w", L"https://en.wikipedia.org/wiki/Special:Search?search={query}"},
     };
 }
 
 inline SearchEngine CreateDefaultEngine() {
-    return {L"New engine", L"", L"https://"};
+    return {L"", L"", L"https://"};
 }
 
 // Host of the URL's template portion ("https://duckduckgo.com/?q=…" →
@@ -99,8 +102,22 @@ struct ParsedEngineQuery {
     std::wstring query;    // Text after the keyword, or the full text.
 };
 
+// Finds an engine whose keyword matches the given token (case-insensitive, trimmed).
+inline int FindEngineByKeyword(const std::vector<SearchEngine>& engines, std::wstring_view keyword) {
+    if (keyword.empty()) return -1;
+    const std::wstring norm = Normalize(keyword);
+    if (norm.empty()) return -1;
+    for (size_t i = 0; i < engines.size(); ++i) {
+        if (!engines[i].keyword.empty() && Normalize(engines[i].keyword) == norm) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
 // Splits "d cats" into the engine matching the "d" keyword plus the trimmed
-// rest. The keyword alone ("d" or "d ") is not web intent, so it parses to -1.
+// rest. The keyword alone ("d") is not web intent, but a keyword with a space
+// ("d ") or followed by query text selects the engine.
 inline ParsedEngineQuery ParseKeywordQuery(const std::vector<SearchEngine>& engines,
                                            const std::wstring& text) {
     ParsedEngineQuery parsed;
@@ -111,12 +128,15 @@ inline ParsedEngineQuery ParseKeywordQuery(const std::vector<SearchEngine>& engi
     const std::wstring token = Normalize(std::wstring_view(text).substr(0, space));
     if (token.empty()) return parsed;
     std::wstring rest = text.substr(space + 1);
-    const size_t first = rest.find_first_not_of(L" \t");
-    if (first == std::wstring::npos) return parsed;
-    rest.erase(0, first);
     for (size_t i = 0; i < engines.size(); ++i) {
         if (!engines[i].keyword.empty() && Normalize(engines[i].keyword) == token) {
             parsed.engineIndex = static_cast<int>(i);
+            const size_t first = rest.find_first_not_of(L" \t");
+            if (first != std::wstring::npos) {
+                rest.erase(0, first);
+            } else {
+                rest.clear();
+            }
             parsed.query = std::move(rest);
             break;
         }

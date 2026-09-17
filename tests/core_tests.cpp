@@ -444,9 +444,10 @@ int main() {
     Check(defaultSettings.enableFileSearch == true, "file search enabled by default in settings");
     defaultSettings.enableFileSearch = false;
     Check(!defaultSettings.enableFileSearch, "file search toggle can be disabled");
-    Check(defaultSettings.searchEngines.size() == 3, "three preset search engines by default");
-    Check(defaultSettings.searchEngines[0].keyword == L"d", "first preset engine keyword is d");
-    Check(defaultSettings.searchEngines[1].keyword == L"yt", "second preset engine keyword is yt");
+    Check(defaultSettings.searchEngines.size() == 6, "six preset search engines by default");
+    Check(defaultSettings.searchEngines[0].keyword == L"g", "first preset engine keyword is g");
+    Check(defaultSettings.searchEngines[1].keyword == L"d", "second preset engine keyword is d");
+    Check(defaultSettings.searchEngines[2].keyword == L"yt", "third preset engine keyword is yt");
     Check(defaultSettings.defaultEngine == 0, "default engine index starts at 0");
     defaultSettings.searchEngines.clear();
     Check(defaultSettings.searchEngines.empty(), "emptying the engine list disables web search");
@@ -475,10 +476,12 @@ int main() {
     Check(!IsUsableEngineUrl(L"duckduckgo.com"), "url without a scheme is not usable");
 
     const std::vector<SearchEngine> presets = DefaultSearchEngines();
-    Check(presets.size() == 3 && presets.size() <= kMaxSearchEngines,
+    Check(presets.size() == 6 && presets.size() <= kMaxSearchEngines,
         "presets fit within the engine cap");
     Check(BuildSearchUrl(presets[0], L"hello world") ==
-        L"https://duckduckgo.com/?q=hello+world", "query substituted into the template");
+        L"https://www.google.com/search?q=hello+world", "query substituted into Google template");
+    Check(BuildSearchUrl(presets[1], L"hello world") ==
+        L"https://duckduckgo.com/?q=hello+world", "query substituted into DuckDuckGo template");
     Check(BuildSearchUrl({{}, {}, L"https://x.test/s={query}&extra={query}"}, L"a b") ==
         L"https://x.test/s=a+b&extra=a+b", "every placeholder is substituted");
     Check(BuildSearchUrl({{}, {}, L"https://x.test/s"}, L"a b") == L"https://x.test/sa+b",
@@ -486,14 +489,26 @@ int main() {
 
     const ParsedEngineQuery bare = ParseKeywordQuery(presets, L"d");
     Check(bare.engineIndex == -1, "a bare keyword is not web intent");
-    const ParsedEngineQuery spaced = ParseKeywordQuery(presets, L"d  cats  ");
-    Check(spaced.engineIndex == 0, "keyword prefix selects the engine");
-    Check(spaced.query == L"cats  ", "query keeps trailing text after the keyword");
+    const ParsedEngineQuery spaceOnlyG = ParseKeywordQuery(presets, L"g ");
+    Check(spaceOnlyG.engineIndex == 0 && spaceOnlyG.query.empty(), "keyword g with space selects Google with empty query");
+    const ParsedEngineQuery spaceOnlyD = ParseKeywordQuery(presets, L"d ");
+    Check(spaceOnlyD.engineIndex == 1 && spaceOnlyD.query.empty(), "keyword d with space selects DuckDuckGo with empty query");
+    const ParsedEngineQuery spacedG = ParseKeywordQuery(presets, L"g  cats  ");
+    Check(spacedG.engineIndex == 0, "keyword g selects Google");
+    Check(spacedG.query == L"cats  ", "query keeps trailing text after the keyword");
+    const ParsedEngineQuery spacedD = ParseKeywordQuery(presets, L"d  cats  ");
+    Check(spacedD.engineIndex == 1, "keyword d selects DuckDuckGo");
+    Check(spacedD.query == L"cats  ", "query keeps trailing text after the keyword");
     const ParsedEngineQuery plain = ParseKeywordQuery(presets, L"just text");
     Check(plain.engineIndex == -1 && plain.query == L"just text", "no keyword keeps the full text");
     const ParsedEngineQuery unknown = ParseKeywordQuery(presets, L"zz cats");
     Check(unknown.engineIndex == -1, "unknown keyword is not web intent");
     Check(ParseKeywordQuery({}, L"d cats").engineIndex == -1, "no engines means no keyword match");
+
+    Check(FindEngineByKeyword(presets, L"g") == 0, "FindEngineByKeyword finds g");
+    Check(FindEngineByKeyword(presets, L"G") == 0, "FindEngineByKeyword is case-insensitive");
+    Check(FindEngineByKeyword(presets, L"yt") == 2, "FindEngineByKeyword finds yt");
+    Check(FindEngineByKeyword(presets, L"xyz") == -1, "FindEngineByKeyword returns -1 for unknown");
 
     SearchEngine edited;
     NormalizeEditedEngine(edited, L"  Trimmed  ", L" g o ", L"  https://g.test/?q={query}  ");

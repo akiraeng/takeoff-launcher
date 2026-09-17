@@ -237,8 +237,15 @@ private:
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         }
+        case WM_MOUSEACTIVATE:
+            return MA_ACTIVATE;
         case WM_ACTIVATE:
-            if (LOWORD(wParam) == WA_INACTIVE && IsWindowVisible(hwnd_)) Hide();
+            if (LOWORD(wParam) == WA_INACTIVE) {
+                if (IsWindowVisible(hwnd_)) Hide();
+            } else {
+                SetFocus(hwnd_);
+                ResetCaret();
+            }
             return 0;
         case WM_SETFOCUS:
             // A hidden system caret exposes the insertion point to IME/accessibility.
@@ -264,15 +271,15 @@ private:
             } else if (wParam == kHotkeyTimer && !hotkeyRegistered_) {
                 RegisterShortcut();
             } else if (wParam == kCaretTimer && GetFocus() == hwnd_ &&
-                    !actionsOpen_ && (page_ == Page::Launcher || engineEditing_)) {
+                    !actionsOpen_ && (page_ == Page::Launcher || (page_ == Page::Settings && engineEditing_))) {
                 caretVisible_ = !caretVisible_;
-                if (engineEditing_) InvalidateRect(hwnd_, nullptr, FALSE);
+                if (page_ == Page::Settings && engineEditing_) InvalidateRect(hwnd_, nullptr, FALSE);
                 else InvalidateSearch();
             }
             return 0;
         case WM_CHAR:
             if (ShouldShowHotkeyWarning()) return 0;
-            if (engineEditing_ && wParam >= L' ' && wParam != 0x7F &&
+            if (page_ == Page::Settings && engineEditing_ && wParam >= L' ' && wParam != 0x7F &&
                 (!(GetKeyState(VK_CONTROL) & 0x8000) || (GetKeyState(VK_MENU) & 0x8000))) {
                 const wchar_t ch = static_cast<wchar_t>(wParam);
                 if (ch >= 0xD800 && ch <= 0xDBFF) {
@@ -293,6 +300,15 @@ private:
             if (page_ == Page::Launcher && !actionsOpen_ && wParam >= L' ' && wParam != 0x7F &&
                 (!(GetKeyState(VK_CONTROL) & 0x8000) || (GetKeyState(VK_MENU) & 0x8000))) {
                 const wchar_t ch = static_cast<wchar_t>(wParam);
+                if (ch == L' ' && queryEngine_ < 0 && !input_.text.empty() && input_.caret == input_.text.size()) {
+                    const int engineIdx = quicklaunch::FindEngineByKeyword(settings_.searchEngines, input_.text);
+                    if (engineIdx >= 0) {
+                        queryEngine_ = engineIdx;
+                        input_.Clear();
+                        OnQueryChanged();
+                        return 0;
+                    }
+                }
                 if (ch >= 0xD800 && ch <= 0xDBFF) {
                     pendingSurrogate_ = ch;
                     return 0;
@@ -360,6 +376,12 @@ private:
             return 0;
         case WM_LBUTTONDBLCLK:
             if (page_ == Page::Launcher && ToDip(GET_Y_LPARAM(lParam)) < kSearchHeight) {
+                const float x = ToDip(GET_X_LPARAM(lParam)), y = ToDip(GET_Y_LPARAM(lParam));
+                if (queryEngine_ >= 0 && PointInSearchBlock(x, y)) {
+                    queryEngine_ = -1;
+                    OnQueryChanged();
+                    return 0;
+                }
                 input_.SelectAll();
                 ResetCaret();
             } else if (page_ == Page::Settings && engineEditing_) {
@@ -421,11 +443,13 @@ private:
                     SetCursor(LoadCursorW(nullptr, hand ? IDC_HAND : IDC_ARROW));
                     return TRUE;
                 }
+                const float textLeft = SearchTextLeft();
+                const bool block = (page_ == Page::Launcher && queryEngine_ >= 0 && PointInSearchBlock(x, y));
                 const bool text = (page_ == Page::Launcher && !actionsOpen_ &&
-                    y < kSearchHeight && x >= kTextLeft && x < width_ - 86) ||
+                    y < kSearchHeight && x >= textLeft && x < width_ - 86) ||
                     (page_ == Page::Settings && engineEditing_ &&
                      EngineFieldAtPoint(x, y) >= 0);
-                const bool button = page_ == Page::Settings ||
+                const bool button = block || page_ == Page::Settings ||
                     ResultAtPoint(x, y) >= 0 || y >= FooterTop() || x > width_ - 84;
                 SetCursor(LoadCursorW(nullptr, text ? IDC_IBEAM : button ? IDC_HAND : IDC_ARROW));
                 return TRUE;
@@ -676,10 +700,10 @@ private:
         if constexpr (!kUiTest) {
             const quicklaunch::EngineRegistryData data =
                 quicklaunch::LoadEnginesFromRegistry(legacyUrl);
-            if (data.stored) {
+            if (data.stored && !data.engines.empty()) {
                 settings_.searchEngines = std::move(data.engines);
                 settings_.defaultEngine = data.defaultEngine;
-            } else {
+            } else if (!data.stored) {
                 // First run (or pre-list install): persist whatever we start
                 // with — the presets, or the migrated legacy-URL engine.
                 // A pre-list install that had web search switched off keeps the
@@ -689,6 +713,12 @@ private:
                 } else if (!data.engines.empty()) {
                     settings_.searchEngines = std::move(data.engines);
                 }
+                SaveSearchEngines();
+            } else {
+                // Stored list was empty (e.g. from an empty migration or pre-list upgrade);
+                // seed with default engines so the user has working search engines out of the box.
+                settings_.searchEngines = quicklaunch::DefaultSearchEngines();
+                settings_.defaultEngine = 0;
                 SaveSearchEngines();
             }
             settings_.defaultEngine = std::clamp(settings_.defaultEngine, 0,
@@ -1079,10 +1109,50 @@ private:
         UpdateRegion();
     }
 
+    void ForceForeground() {
+        if (!hwnd_) return;
+        const HWND foreHwnd = GetForegroundWindow();
+        const DWORD foreThread = foreHwnd ? GetWindowThreadProcessId(foreHwnd, nullptr) : 0;
+        const DWORD appThread = GetCurrentThreadId();
+
+        LockSetForegroundWindow(LSFW_UNLOCK);
+        if (foreThread && foreThread != appThread) {
+            AttachThreadInput(foreThread, appThread, TRUE);
+            SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+            BringWindowToTop(hwnd_);
+            SetForegroundWindow(hwnd_);
+            AttachThreadInput(foreThread, appThread, FALSE);
+        } else {
+            SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+            BringWindowToTop(hwnd_);
+            SetForegroundWindow(hwnd_);
+        }
+
+        if (GetForegroundWindow() != hwnd_) {
+            keybd_event(0, 0, 0, 0);
+            SetForegroundWindow(hwnd_);
+        }
+
+        SetActiveWindow(hwnd_);
+        SetFocus(hwnd_);
+    }
+
     void Show() {
         KillTimer(hwnd_, kTrimTimer);
         page_ = Page::Launcher;
         hotkeyWarningDismissed_ = false;
+        recordingRow_ = -1;
+        enginesPage_ = false;
+        enginesScroll_ = 0.0f;
+        enginesDraggingScroll_ = false;
+        engineEditing_ = false;
+        engineEditIsNew_ = false;
+        engineEditIndex_ = -1;
+        nameInput_.Clear();
+        keywordInput_.Clear();
+        urlInput_.Clear();
         input_.Clear();
         pendingSurrogate_ = 0;
         composition_.clear();
@@ -1092,9 +1162,10 @@ private:
         status_.clear();
         mouseKnown_ = false;
         hoverLockRow_ = -1;
-        webSearchCardHovered_ = false;
         activeEngine_ = std::clamp(settings_.defaultEngine, 0,
             (std::max)(0, static_cast<int>(settings_.searchEngines.size()) - 1));
+        queryEngine_ = -1;
+        webQuery_.clear();
         // The input was just cleared, so the parsed keyword engine has to be
         // dropped too: UpdateResults() short-circuits on a stale queryEngine_
         // and would leave the (empty) result list blank instead of showing recents.
@@ -1102,8 +1173,7 @@ private:
         UpdateResults();
         ResizeAndPosition();
         ShowWindow(hwnd_, SW_SHOWNORMAL);
-        SetForegroundWindow(hwnd_);
-        SetFocus(hwnd_);
+        ForceForeground();
         ResetCaret();
         if constexpr (!kUiTest) {
             const auto now = std::chrono::steady_clock::now();
@@ -1323,6 +1393,19 @@ private:
         actionsOpen_ = false;
         adminActionHovered_ = false;
         dragging_ = false;
+        editDragging_ = false;
+        enginesDraggingScroll_ = false;
+        settingsDraggingScroll_ = false;
+        recordingRow_ = -1;
+        enginesPage_ = false;
+        engineEditing_ = false;
+        engineEditIsNew_ = false;
+        engineEditIndex_ = -1;
+        nameInput_.Clear();
+        keywordInput_.Clear();
+        urlInput_.Clear();
+        queryEngine_ = -1;
+        webQuery_.clear();
         if (GetCapture() == hwnd_) ReleaseCapture();
         KillTimer(hwnd_, kCaretTimer);
         ShowWindow(hwnd_, SW_HIDE);
@@ -1553,10 +1636,24 @@ private:
 
     // Splits "d cats" into the engine matching the "d" keyword plus the rest.
     void ParseQueryEngine() {
+        if (queryEngine_ >= static_cast<int>(settings_.searchEngines.size())) {
+            queryEngine_ = -1;
+        }
+        if (queryEngine_ >= 0) {
+            webQuery_ = input_.text;
+            return;
+        }
         const quicklaunch::ParsedEngineQuery parsed =
             quicklaunch::ParseKeywordQuery(settings_.searchEngines, input_.text);
-        queryEngine_ = parsed.engineIndex;
-        webQuery_ = parsed.query;
+        if (parsed.engineIndex >= 0) {
+            queryEngine_ = parsed.engineIndex;
+            input_.Clear();
+            input_.Insert(parsed.query);
+            webQuery_ = input_.text;
+            return;
+        }
+        queryEngine_ = -1;
+        webQuery_ = input_.text;
     }
 
     void OpenEnginesPage() {
@@ -1578,6 +1675,19 @@ private:
         enginesScroll_ = 0.0f;
         enginesDraggingScroll_ = false;
         KillTimer(hwnd_, kCaretTimer);
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    void RestoreDefaultEngines() {
+        if (engineEditing_) EndEngineEditing(false);
+        settings_.searchEngines = quicklaunch::DefaultSearchEngines();
+        settings_.defaultEngine = 0;
+        activeEngine_ = 0;
+        enginesSelected_ = 0;
+        enginesScroll_ = 0.0f;
+        SaveSearchEngines();
+        ParseQueryEngine();
+        settingsStatus_ = L"Search engines restored to default.";
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
@@ -1658,7 +1768,7 @@ private:
         // URL, so an abandoned draft cannot leave "New engine / https://" behind.
         settings_.searchEngines.push_back(quicklaunch::CreateDefaultEngine());
         enginesSelected_ = static_cast<int>(settings_.searchEngines.size()) - 1;
-        StartEngineEditing(enginesSelected_, 2, true);
+        StartEngineEditing(enginesSelected_, 0, true);
     }
 
     void RemoveEngine(int row) {
@@ -1696,8 +1806,8 @@ private:
             return;
         }
         if (key == VK_UP) {
-            if (engineEditField_ > 0) {
-                --engineEditField_;
+            if (engineEditField_ == 2) {
+                engineEditField_ = 0;
                 urlScroll_ = 0.0f;
                 ResetCaret();
             }
@@ -1706,7 +1816,7 @@ private:
         }
         if (key == VK_DOWN) {
             if (engineEditField_ < 2) {
-                ++engineEditField_;
+                engineEditField_ = 2;
                 urlScroll_ = 0.0f;
                 ResetCaret();
             }
@@ -1783,7 +1893,7 @@ private:
             ScrollEngines(kSettingsRowHeight * 2);
         } else if (key == VK_RETURN) {
             if (enginesSelected_ >= count) AddEngine();
-            else StartEngineEditing(enginesSelected_, 2);
+            else StartEngineEditing(enginesSelected_, 0);
         } else if (key == VK_DELETE) {
             if (enginesSelected_ < count) RemoveEngine(enginesSelected_);
         } else if (key == VK_SPACE || (control && key == 'D')) {
@@ -1854,23 +1964,24 @@ private:
 
     D2D1_RECT_F EngineEditFieldRect(int row, int field) const {
         const float top = kSettingsHeaderHeight + EngineContentTop(row) - enginesScroll_;
-        const float left = 56.0f;
+        const float left = 32.0f;
         const float right = width_ - 32.0f;
+        const float kwWidth = 170.0f;
+        const float gap = 12.0f;
+        const float nameWidth = (right - left) - kwWidth - gap;
         switch (field) {
-        case 0: return D2D1::RectF(left, top + 8.0f, right, top + 36.0f);
-        case 1: return D2D1::RectF(left, top + 42.0f, right, top + 70.0f);
-        default: return D2D1::RectF(left, top + 76.0f, right, top + 104.0f);
+        case 0: return D2D1::RectF(left, top + 24.0f, left + nameWidth, top + 56.0f);
+        case 1: return D2D1::RectF(left + nameWidth + gap, top + 24.0f, right, top + 56.0f);
+        default: return D2D1::RectF(left, top + 80.0f, right, top + 114.0f);
         }
     }
 
     int EngineFieldAtPoint(float x, float y) const {
         if (!engineEditing_ || engineEditIndex_ < 0) return -1;
         for (int field = 0; field < 3; ++field) {
-            // The padded box DrawEditField paints counts as a hit, so the
-            // visible edge of a field is clickable too.
             const auto rect = EngineEditFieldRect(engineEditIndex_, field);
             if (x >= rect.left - 4.0f && x <= rect.right + 4.0f &&
-                    y >= rect.top - 2.0f && y <= rect.bottom + 2.0f) {
+                    y >= rect.top - 18.0f && y <= rect.bottom + 4.0f) {
                 return field;
             }
         }
@@ -1895,7 +2006,7 @@ private:
             BOOL trailing = FALSE, inside = FALSE;
             DWRITE_HIT_TEST_METRICS hit{};
             const auto rect = EngineEditFieldRect(engineEditIndex_, engineEditField_);
-            layout->HitTestPoint(x - rect.left + urlScroll_, 10, &trailing, &inside, &hit);
+            layout->HitTestPoint(x - (rect.left + 8.0f) + urlScroll_, 10, &trailing, &inside, &hit);
             field->MoveTo(static_cast<size_t>(hit.textPosition) + (trailing ? hit.length : 0), selecting);
         }
         ResetCaret();
@@ -1904,7 +2015,15 @@ private:
 
     void HandleEnginesClick(float x, float y) {
         if (y < kSettingsHeaderHeight) {
-            if (x < 46.0f) CloseEnginesPage();
+            if (x < 46.0f) {
+                CloseEnginesPage();
+                return;
+            }
+            const auto resetRect = ResetButtonRect();
+            if (x >= resetRect.left && x <= resetRect.right && y >= resetRect.top && y <= resetRect.bottom) {
+                RestoreDefaultEngines();
+                return;
+            }
             return;
         }
         if (y >= FooterTop()) return;
@@ -1952,7 +2071,7 @@ private:
                 RemoveEngine(row);
                 return;
             }
-            StartEngineEditing(row, 2);
+            StartEngineEditing(row, 0);
         } else if (row == count) {
             enginesSelected_ = row;
             AddEngine();
@@ -2208,6 +2327,9 @@ private:
             } else if (!input_.text.empty()) {
                 input_.Clear();
                 OnQueryChanged();
+            } else if (queryEngine_ >= 0) {
+                queryEngine_ = -1;
+                OnQueryChanged();
             } else {
                 Hide();
             }
@@ -2246,6 +2368,10 @@ private:
         }
         switch (key) {
         case VK_RETURN:
+            if (queryEngine_ >= 0) {
+                if (OpenWebSearch(webQuery_)) Hide();
+                return 0;
+            }
             if (results_.empty() && !takeoff::Normalize(input_.text).empty()) {
                 if (!QueryEngine()) {
                     status_ = L"No results. Add a search engine in settings.";
@@ -2253,9 +2379,7 @@ private:
                     InvalidateRect(hwnd_, nullptr, FALSE);
                     return 0;
                 }
-                // A keyword query is explicit web intent; no need to wait for
-                // the app/file index before opening the browser.
-                const bool allReady = queryEngine_ >= 0 || (indexReady_ &&
+                const bool allReady = (indexReady_ &&
                     (!settings_.enableFileSearch || takeoff::FileIndex::Instance().IsReady()));
                 if (allReady) {
                     if (OpenWebSearch(webQuery_)) Hide();
@@ -2270,9 +2394,23 @@ private:
         case VK_UP: MoveSelection(-1, true); return 0;
         case VK_DOWN: MoveSelection(1, true); return 0;
         case VK_TAB:
-            // Only cycle when the query has no keyword engine: with a keyword
-            // prefix the footer, the card and Enter all follow the keyword
-            // engine, so cycling the active engine would look dead.
+            if (queryEngine_ < 0 && !input_.text.empty()) {
+                const int engineIdx = quicklaunch::FindEngineByKeyword(settings_.searchEngines, input_.text);
+                if (engineIdx >= 0) {
+                    queryEngine_ = engineIdx;
+                    input_.Clear();
+                    OnQueryChanged();
+                    return 0;
+                }
+            }
+            if (queryEngine_ >= 0) {
+                const int count = static_cast<int>(settings_.searchEngines.size());
+                if (count > 1) {
+                    queryEngine_ = (queryEngine_ + (shift ? -1 : 1) + count) % count;
+                    OnQueryChanged();
+                }
+                return 0;
+            }
             if (queryEngine_ < 0 && results_.empty() && !takeoff::Normalize(input_.text).empty() &&
                     settings_.searchEngines.size() > 1) {
                 const int count = static_cast<int>(settings_.searchEngines.size());
@@ -2286,7 +2424,21 @@ private:
         case VK_RIGHT: input_.Move(true, shift, control); ResetCaret(); return 0;
         case VK_HOME: input_.MoveTo(0, shift); ResetCaret(); return 0;
         case VK_END: input_.MoveTo(input_.text.size(), shift); ResetCaret(); return 0;
-        case VK_BACK: input_.Erase(true, control); OnQueryChanged(); return 0;
+        case VK_BACK:
+            if (queryEngine_ >= 0 && input_.text.empty()) {
+                if (queryEngine_ < static_cast<int>(settings_.searchEngines.size())) {
+                    const auto& kw = settings_.searchEngines[queryEngine_].keyword;
+                    queryEngine_ = -1;
+                    input_.text = kw;
+                    input_.caret = kw.size();
+                    OnQueryChanged();
+                    return 0;
+                }
+                queryEngine_ = -1;
+                OnQueryChanged();
+                return 0;
+            }
+            input_.Erase(true, control); OnQueryChanged(); return 0;
         case VK_DELETE: input_.Erase(false, control); OnQueryChanged(); return 0;
         }
         return DefWindowProcW(hwnd_, WM_KEYDOWN, key, lParam);
@@ -2331,7 +2483,20 @@ private:
             }
         }
         CloseClipboard();
-        if (!value.empty()) { input_.Insert(value); OnQueryChanged(); }
+        if (!value.empty()) {
+            if (queryEngine_ < 0) {
+                const auto parsed = quicklaunch::ParseKeywordQuery(settings_.searchEngines, value);
+                if (parsed.engineIndex >= 0) {
+                    queryEngine_ = parsed.engineIndex;
+                    input_.Clear();
+                    input_.Insert(parsed.query);
+                    OnQueryChanged();
+                    return;
+                }
+            }
+            input_.Insert(value);
+            OnQueryChanged();
+        }
     }
 
     void HandleComposition(LPARAM flags) {
@@ -2718,8 +2883,18 @@ private:
             return;
         }
         if (y < kSearchHeight) {
-            if (x > width_ - 84 && x < width_ - 52 && !input_.text.empty()) {
+            if (queryEngine_ >= 0) {
+                const auto blockRect = SearchBlockRect();
+                if (x >= blockRect.left && x <= blockRect.right &&
+                    y >= blockRect.top && y <= blockRect.bottom) {
+                    queryEngine_ = -1;
+                    OnQueryChanged();
+                    return;
+                }
+            }
+            if (x > width_ - 84 && x < width_ - 52 && (!input_.text.empty() || queryEngine_ >= 0)) {
                 input_.Clear();
+                queryEngine_ = -1;
                 OnQueryChanged();
             } else if (x >= width_ - 52) {
                 OpenSettings();
@@ -2754,8 +2929,6 @@ private:
             const bool control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             const bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
             LaunchSelected(MatchesAdministratorHotkey(control, shift, alt));
-        } else if (PointInWebSearchCard(x, y)) {
-            if (OpenWebSearch(webQuery_)) Hide();
         }
     }
 
@@ -2888,12 +3061,8 @@ private:
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
         }
-        if (page_ == Page::Launcher && results_.empty() && QueryEngine() != nullptr) {
-            const bool hovered = PointInWebSearchCard(x, y);
-            if (hovered != webSearchCardHovered_) {
-                webSearchCardHovered_ = hovered;
-                InvalidateRect(hwnd_, nullptr, FALSE);
-            }
+        if (page_ == Page::Launcher && queryEngine_ >= 0 && (y < kSearchHeight || mouseY_ < kSearchHeight)) {
+            InvalidateSearch();
         }
         if (page_ == Page::Launcher && HasResult()) {
             const bool hovered = PointInAdminAction(x, y);
@@ -2957,12 +3126,46 @@ private:
         return layout;
     }
 
+    D2D1_RECT_F SearchBlockRect() const {
+        if (queryEngine_ < 0 || queryEngine_ >= static_cast<int>(settings_.searchEngines.size())) {
+            return D2D1::RectF(0, 0, 0, 0);
+        }
+        const auto* engine = QueryEngine();
+        const std::wstring name = quicklaunch::EngineDisplayName(*engine);
+        float textWidth = 36.0f;
+        auto layout = Layout(name, resultFormat_.Get(), 1000.0f);
+        if (layout) {
+            DWRITE_TEXT_METRICS metrics{};
+            layout->GetMetrics(&metrics);
+            textWidth = metrics.widthIncludingTrailingWhitespace;
+        }
+        const float blockWidth = 26.0f + textWidth + 24.0f;
+        constexpr float blockHeight = 28.0f;
+        const float blockTop = (kSearchHeight - blockHeight) / 2.0f;
+        return D2D1::RectF(18.0f, blockTop, 18.0f + blockWidth, blockTop + blockHeight);
+    }
+
+    float SearchTextLeft() const {
+        if (queryEngine_ >= 0) {
+            const auto rect = SearchBlockRect();
+            return rect.right + 10.0f;
+        }
+        return kTextLeft;
+    }
+
+    bool PointInSearchBlock(float x, float y) const {
+        if (queryEngine_ < 0) return false;
+        const auto rect = SearchBlockRect();
+        return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    }
+
     void PlaceCaret(float x, bool selecting) {
+        const float textLeft = SearchTextLeft();
         auto layout = Layout(input_.text, searchFormat_.Get(), 32768);
         if (layout) {
             BOOL trailing = FALSE, inside = FALSE;
             DWRITE_HIT_TEST_METRICS hit{};
-            layout->HitTestPoint(x - kTextLeft + textScroll_, 10, &trailing, &inside, &hit);
+            layout->HitTestPoint(x - textLeft + textScroll_, 10, &trailing, &inside, &hit);
             input_.MoveTo(static_cast<size_t>(hit.textPosition) + (trailing ? hit.length : 0), selecting);
         }
         ResetCaret();
@@ -3378,19 +3581,77 @@ private:
         }
     }
 
+    void DrawSearchBlock(const D2D1_RECT_F& block) {
+        if (queryEngine_ < 0 || queryEngine_ >= static_cast<int>(settings_.searchEngines.size())) return;
+        const auto* engine = QueryEngine();
+        const std::wstring name = quicklaunch::EngineDisplayName(*engine);
+        const bool blockHovered = mouseKnown_ && mouseX_ >= block.left && mouseX_ <= block.right &&
+                                  mouseY_ >= block.top && mouseY_ <= block.bottom;
+
+        // 1. Block pill background and border
+        const auto roundedRect = D2D1::RoundedRect(block, 7.0f, 7.0f);
+        if (highContrast_) {
+            Fill(block, blockHovered ? SystemColor(COLOR_HIGHLIGHT) : SystemColor(COLOR_BTNFACE), 7.0f);
+            brush_->SetColor(Foreground());
+            target_->DrawRoundedRectangle(roundedRect, brush_.Get(), 1.0f);
+        } else {
+            Fill(block, blockHovered ? D2D1::ColorF(0x3B82F6, 0.25f) : D2D1::ColorF(0x3B82F6, 0.14f), 7.0f);
+            brush_->SetColor(blockHovered ? D2D1::ColorF(0x6EA8FE, 0.70f) : D2D1::ColorF(0x6EA8FE, 0.40f));
+            target_->DrawRoundedRectangle(roundedRect, brush_.Get(), 1.0f);
+        }
+
+        // 2. Search icon inside the block
+        const float iconCx = block.left + 14.0f;
+        const float iconCy = (block.top + block.bottom) / 2.0f;
+        const auto iconColor = highContrast_ ? (blockHovered ? SystemColor(COLOR_HIGHLIGHTTEXT) : Foreground())
+                                             : D2D1::ColorF(0x6EA8FE);
+        brush_->SetColor(iconColor);
+        constexpr float radius = 4.2f;
+        target_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(iconCx, iconCy - 0.5f), radius, radius), brush_.Get(), 1.4f);
+        Line(iconCx + radius * 0.707f, iconCy - 0.5f + radius * 0.707f,
+             iconCx + radius + 3.2f, iconCy - 0.5f + radius + 3.2f, iconColor, 1.4f);
+
+        // 3. Engine name
+        auto layout = Layout(name, resultFormat_.Get(), block.right - block.left);
+        if (layout) {
+            DWRITE_TEXT_METRICS metrics{};
+            layout->GetMetrics(&metrics);
+            const float textY = block.top + (block.bottom - block.top - metrics.height) / 2.0f;
+            brush_->SetColor(highContrast_ && blockHovered ? SystemColor(COLOR_HIGHLIGHTTEXT) : Foreground());
+            target_->DrawTextLayout(D2D1::Point2F(block.left + 26.0f, textY), layout.Get(), brush_.Get());
+        }
+
+        // 4. Subtle close button 'x'
+        const float closeCx = block.right - 12.0f;
+        const float closeCy = (block.top + block.bottom) / 2.0f;
+        const bool closeHovered = mouseKnown_ && mouseX_ >= block.right - 20.0f && mouseX_ <= block.right &&
+                                  mouseY_ >= block.top && mouseY_ <= block.bottom;
+        const auto closeColor = highContrast_
+            ? (blockHovered ? SystemColor(COLOR_HIGHLIGHTTEXT) : Foreground())
+            : (closeHovered ? D2D1::ColorF(1, 1, 1, 0.90f) : D2D1::ColorF(1, 1, 1, 0.45f));
+        Line(closeCx - 3.2f, closeCy - 3.2f, closeCx + 3.2f, closeCy + 3.2f, closeColor, 1.2f);
+        Line(closeCx - 3.2f, closeCy + 3.2f, closeCx + 3.2f, closeCy - 3.2f, closeColor, 1.2f);
+    }
+
     void DrawSearch() {
-        SearchGlyph(26, 30);
+        if (queryEngine_ >= 0) {
+            const auto blockRect = SearchBlockRect();
+            DrawSearchBlock(blockRect);
+        } else {
+            SearchGlyph(26, 30);
+        }
+        const float textLeft = SearchTextLeft();
         const float right = width_ - 92;
-        const auto clip = D2D1::RectF(kTextLeft, 12, right, kSearchHeight - 12);
+        const auto clip = D2D1::RectF(textLeft, 12, right, kSearchHeight - 12);
         auto layout = Layout(input_.text, searchFormat_.Get(), 32768);
         if (layout) {
             float caret = 0, y = 0;
             DWRITE_HIT_TEST_METRICS hit{};
             layout->HitTestTextPosition(static_cast<UINT32>(input_.caret), FALSE, &caret, &y, &hit);
-            const float available = right - kTextLeft - 3;
+            const float available = right - textLeft - 3;
             textScroll_ = (std::max)(0.0f, (std::max)(caret - available, (std::min)(textScroll_, caret)));
-            const float origin = kTextLeft - textScroll_;
-            caretX_ = std::clamp(origin + caret, kTextLeft, right - 2);
+            const float origin = textLeft - textScroll_;
+            caretX_ = std::clamp(origin + caret, textLeft, right - 2);
             DWRITE_TEXT_METRICS metrics{};
             layout->GetMetrics(&metrics);
             const float top = (kSearchHeight - metrics.height) / 2;
@@ -3411,8 +3672,11 @@ private:
                 }
             }
             if (input_.text.empty() && composition_.empty()) {
-                Text(L"Search apps and launch something\u2026",
-                    D2D1::RectF(kTextLeft + 2, 0, right, kSearchHeight), searchFormat_.Get(), Muted());
+                const std::wstring placeholder = (queryEngine_ >= 0 && QueryEngine() != nullptr)
+                    ? L"Search " + quicklaunch::EngineDisplayName(*QueryEngine()) + L"\u2026"
+                    : L"Search apps and launch something\u2026";
+                Text(placeholder,
+                    D2D1::RectF(textLeft + 2, 0, right, kSearchHeight), searchFormat_.Get(), Muted());
             } else {
                 brush_->SetColor(Foreground());
                 target_->DrawTextLayout(D2D1::Point2F(origin, top), layout.Get(), brush_.Get());
@@ -3427,7 +3691,7 @@ private:
             target_->PopAxisAlignedClip();
             PositionIme();
         }
-        if (!input_.text.empty()) {
+        if (!input_.text.empty() || queryEngine_ >= 0) {
             Line(width_ - 74, 28, width_ - 66, 36, Muted(), 1.4f);
             Line(width_ - 74, 36, width_ - 66, 28, Muted(), 1.4f);
         }
@@ -3436,11 +3700,14 @@ private:
     }
 
     void DrawResults() {
-        const std::wstring section = !indexReady_ ? L"Applications" : input_.text.empty()
+        const std::wstring section = (queryEngine_ >= 0) ? L"Web Search"
+            : !indexReady_ ? L"Applications" : input_.text.empty()
             ? (recent_.empty() ? L"Applications" : L"Recent & all applications") : L"Results";
         Text(section, D2D1::RectF(16, kSearchHeight, width_ / 2, ResultsTop()),
             hintFormat_.Get(), Muted());
-        const std::wstring count = !indexReady_ ? L"Indexing\u2026" : std::to_wstring(results_.size()) +
+        const std::wstring count = (queryEngine_ >= 0 && QueryEngine() != nullptr)
+            ? (quicklaunch::EngineDisplayName(*QueryEngine()))
+            : !indexReady_ ? L"Indexing\u2026" : std::to_wstring(results_.size()) +
             (input_.text.empty() ? L" apps" : results_.size() == 1 ? L" match" : L" matches");
         Text(count, D2D1::RectF(width_ / 2, kSearchHeight, width_ - 18, ResultsTop()),
             hintFormat_.Get(), Muted(), DWRITE_TEXT_ALIGNMENT_TRAILING);
@@ -3450,55 +3717,25 @@ private:
             const bool hasQuery = !input_.text.empty();
             const bool hasSearchableText = !takeoff::Normalize(input_.text).empty();
 
-            if (hasSearchableText && QueryEngine() != nullptr) {
-                SearchGlyph(width_ / 2.0f - 3.0f, center - 62.0f, 12.0f);
-                Text(!indexReady_ ? L"Finding your applications\u2026" : L"No matching applications",
-                    D2D1::RectF(32.0f, center - 42.0f, width_ - 32.0f, center - 14.0f), resultFormat_.Get(),
-                    Foreground(), DWRITE_TEXT_ALIGNMENT_CENTER);
-
-                const auto cardRect = WebSearchCardRect();
-                const bool hovering = mouseKnown_ && PointInWebSearchCard(mouseX_, mouseY_);
-
-                if (highContrast_) {
-                    Fill(cardRect, hovering ? SystemColor(COLOR_HIGHLIGHT) : SystemColor(COLOR_BTNFACE), 8.0f);
-                    brush_->SetColor(hovering ? SystemColor(COLOR_HIGHLIGHTTEXT) : Foreground());
-                    target_->DrawRoundedRectangle(D2D1::RoundedRect(cardRect, 8.0f, 8.0f), brush_.Get(), 1.0f);
-                } else {
-                    Fill(cardRect, hovering ? D2D1::ColorF(0x6EA8FE, 0.16f) : D2D1::ColorF(1, 1, 1, 0.055f), 8.0f);
-                    brush_->SetColor(hovering ? D2D1::ColorF(0x6EA8FE, 0.55f) : D2D1::ColorF(1, 1, 1, 0.12f));
-                    target_->DrawRoundedRectangle(D2D1::RoundedRect(cardRect, 8.0f, 8.0f), brush_.Get(), 1.0f);
-                }
-
-                SearchGlyph(cardRect.left + 22.0f, (cardRect.top + cardRect.bottom) / 2.0f - 1.0f, 6.0f);
-
-                const std::wstring engineName = QueryEngine()->name.empty()
-                    ? quicklaunch::ExtractHostname(QueryEngine()->url) : QueryEngine()->name;
-                const std::wstring searchPrompt = L"Search " + engineName + L" for \u201C" + webQuery_ + L"\u201D";
-                const auto promptRect = D2D1::RectF(cardRect.left + 38.0f, cardRect.top, cardRect.right - 54.0f, cardRect.bottom);
-                const auto textColor = highContrast_ && hovering ? SystemColor(COLOR_HIGHLIGHTTEXT) : Foreground();
-                Text(searchPrompt, promptRect, resultFormat_.Get(), textColor);
-
-                Key(L"↵", cardRect.right - 44.0f, (cardRect.top + cardRect.bottom) / 2.0f - 11.0f, 30.0f);
-
-                Text(L"Press Enter or click to search in your browser",
-                    D2D1::RectF(32.0f, cardRect.bottom + 12.0f, width_ - 32.0f, cardRect.bottom + 34.0f),
-                    hintFormat_.Get(), Muted(), DWRITE_TEXT_ALIGNMENT_CENTER);
-            } else {
-                SearchGlyph(width_ / 2.0f - 3.0f, center - 48.0f, 12.0f);
-                Text(!indexReady_ ? L"Finding your applications\u2026" : !hasQuery
-                        ? L"No applications found" : L"No matching applications",
-                    D2D1::RectF(32.0f, center - 13.0f, width_ - 32.0f, center + 17.0f), resultFormat_.Get(),
-                    Foreground(), DWRITE_TEXT_ALIGNMENT_CENTER);
-                const std::wstring hint = !indexReady_
-                    ? L"Your Start Menu and installed apps will appear here."
+            SearchGlyph(width_ / 2.0f - 3.0f, center - 48.0f, 12.0f);
+            const std::wstring headerText = (queryEngine_ >= 0 && QueryEngine() != nullptr)
+                ? (L"Search " + (QueryEngine()->name.empty() ? quicklaunch::ExtractHostname(QueryEngine()->url) : QueryEngine()->name))
+                : (!indexReady_ ? L"Finding your applications\u2026" : !hasQuery
+                    ? L"No applications found" : L"No matching applications");
+            Text(headerText,
+                D2D1::RectF(32.0f, center - 13.0f, width_ - 32.0f, center + 17.0f), resultFormat_.Get(),
+                Foreground(), DWRITE_TEXT_ALIGNMENT_CENTER);
+            const std::wstring hint = !indexReady_
+                ? L"Your Start Menu and installed apps will appear here."
+                : (queryEngine_ >= 0)
+                    ? L"Press Enter to open in your browser."
                     : !hasQuery
                         ? L"Apps from your Start Menu appear here."
-                        : hasSearchableText && settings_.searchEngines.empty()
-                            ? L"Add a search engine in Settings. Press Esc to clear."
+                        : hasSearchableText && QueryEngine() != nullptr
+                            ? L"Press Enter to search the web."
                             : L"Try a shorter name, or press Esc to clear your search.";
-                Text(hint, D2D1::RectF(32.0f, center + 20.0f, width_ - 32.0f, center + 48.0f), hintFormat_.Get(),
-                    Muted(), DWRITE_TEXT_ALIGNMENT_CENTER);
-            }
+            Text(hint, D2D1::RectF(32.0f, center + 20.0f, width_ - 32.0f, center + 48.0f), hintFormat_.Get(),
+                Muted(), DWRITE_TEXT_ALIGNMENT_CENTER);
             return;
         }
         float currentTop = ResultsTop();
@@ -3609,23 +3846,6 @@ private:
             Fill(D2D1::RectF(width_ - 6, ResultsTop() + offset, width_ - 3, ResultsTop() + offset + thumb),
                 D2D1::ColorF(1, 1, 1, 0.22f), 1.5f);
         }
-    }
-
-    D2D1_RECT_F WebSearchCardRect() const {
-        const float center = (ResultsTop() + FooterTop()) / 2.0f;
-        constexpr float cardHeight = 44.0f;
-        const float cardWidth = (std::min)(width_ - 64.0f, 460.0f);
-        const float left = (width_ - cardWidth) / 2.0f;
-        const float top = center + 6.0f;
-        return D2D1::RectF(left, top, left + cardWidth, top + cardHeight);
-    }
-
-    bool PointInWebSearchCard(float x, float y) const {
-        if (page_ != Page::Launcher || !results_.empty() || QueryEngine() == nullptr ||
-            takeoff::Normalize(input_.text).empty() ||
-            takeoff::Normalize(webQuery_).empty()) return false;
-        const auto rect = WebSearchCardRect();
-        return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
     }
 
     D2D1_RECT_F UpdateIndicatorRect() const {
@@ -3875,13 +4095,11 @@ private:
                 hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted(),
                 DWRITE_TEXT_ALIGNMENT_TRAILING);
         }
-        if (results_.empty() && !takeoff::Normalize(input_.text).empty() && QueryEngine() != nullptr) {
+        if (results_.empty() && (!takeoff::Normalize(input_.text).empty() || queryEngine_ >= 0) && QueryEngine() != nullptr) {
             const quicklaunch::SearchEngine* engine = QueryEngine();
             const std::wstring engineName = engine->name.empty()
                 ? quicklaunch::ExtractHostname(engine->url) : engine->name;
-            // Only advertise Tab when it really cycles: a keyword engine in the
-            // query pins the engine, and the Tab handler skips cycling then.
-            const float tabWidth = (queryEngine_ < 0 && settings_.searchEngines.size() > 1)
+            const float tabWidth = (settings_.searchEngines.size() > 1)
                 ? 30.0f : 0.0f;
             Text(L"Search " + engineName,
                 D2D1::RectF(middle, top, width_ - 60 - tabWidth, height_),
@@ -4138,23 +4356,23 @@ private:
                     active ? (highContrast_ ? SystemColor(COLOR_HIGHLIGHTTEXT) : Foreground()) : (tabHover ? Foreground() : Muted()),
                     DWRITE_TEXT_ALIGNMENT_CENTER);
             }
-
-            // Reset to default button
-            const auto resetRect = ResetButtonRect();
-            const bool resetSelected = (settingsSelected_ == 9);
-            const bool resetHover = mouseKnown_ && mouseX_ >= resetRect.left && mouseX_ <= resetRect.right && mouseY_ >= resetRect.top && mouseY_ <= resetRect.bottom;
-            const bool resetHighlight = resetSelected || resetHover;
-            Fill(resetRect, highContrast_
-                ? (resetHighlight ? SystemColor(COLOR_HIGHLIGHT) : SystemColor(COLOR_BTNFACE))
-                : resetHighlight ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(1, 1, 1, 0.04f), 5.0f);
-            brush_->SetColor(highContrast_
-                ? (resetHighlight ? SystemColor(COLOR_HIGHLIGHTTEXT) : Foreground())
-                : resetHighlight ? D2D1::ColorF(1, 1, 1, 0.22f) : D2D1::ColorF(1, 1, 1, 0.10f));
-            target_->DrawRoundedRectangle(D2D1::RoundedRect(resetRect, 5.0f, 5.0f), brush_.Get(), 1.0f);
-            Text(L"Reset to default", resetRect, hintFormat_.Get(),
-                highContrast_ && resetHighlight ? SystemColor(COLOR_HIGHLIGHTTEXT) : (resetHighlight ? Foreground() : Muted()),
-                DWRITE_TEXT_ALIGNMENT_CENTER);
         }
+
+        // Reset to default button
+        const auto resetRect = ResetButtonRect();
+        const bool resetSelected = !enginesPage_ && (settingsSelected_ == 9);
+        const bool resetHover = mouseKnown_ && mouseX_ >= resetRect.left && mouseX_ <= resetRect.right && mouseY_ >= resetRect.top && mouseY_ <= resetRect.bottom;
+        const bool resetHighlight = resetSelected || resetHover;
+        Fill(resetRect, highContrast_
+            ? (resetHighlight ? SystemColor(COLOR_HIGHLIGHT) : SystemColor(COLOR_BTNFACE))
+            : resetHighlight ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(1, 1, 1, 0.04f), 5.0f);
+        brush_->SetColor(highContrast_
+            ? (resetHighlight ? SystemColor(COLOR_HIGHLIGHTTEXT) : Foreground())
+            : resetHighlight ? D2D1::ColorF(1, 1, 1, 0.22f) : D2D1::ColorF(1, 1, 1, 0.10f));
+        target_->DrawRoundedRectangle(D2D1::RoundedRect(resetRect, 5.0f, 5.0f), brush_.Get(), 1.0f);
+        Text(L"Reset to default", resetRect, hintFormat_.Get(),
+            highContrast_ && resetHighlight ? SystemColor(COLOR_HIGHLIGHTTEXT) : (resetHighlight ? Foreground() : Muted()),
+            DWRITE_TEXT_ALIGNMENT_CENTER);
 
         // Fixed footer drawn above scrollable content (subtle translucent tint - NO BLACK BARS!)
         const float top = FooterTop();
@@ -4179,44 +4397,72 @@ private:
     void DrawEditField(const D2D1_RECT_F& box, int field) {
         SearchInput& input = field == 0 ? nameInput_ : field == 1 ? keywordInput_ : urlInput_;
         const bool focused = (field == engineEditField_);
-        if (focused) {
-            Fill(D2D1::RectF(box.left - 4, box.top - 2, box.right + 4, box.bottom + 2),
-                D2D1::ColorF(1, 1, 1, 0.05f), 4.0f);
-            brush_->SetColor(D2D1::ColorF(1, 1, 1, 0.12f));
-            target_->DrawRoundedRectangle(
-                D2D1::RoundedRect(D2D1::RectF(box.left - 4, box.top - 2, box.right + 4, box.bottom + 2), 4, 4),
-                brush_.Get(), 1.0f);
+        const bool hovered = mouseKnown_ && mouseX_ >= box.left && mouseX_ <= box.right &&
+                             mouseY_ >= box.top && mouseY_ <= box.bottom;
+
+        // 1. Label above the box
+        const wchar_t* label = field == 0 ? L"NAME"
+            : field == 1 ? L"KEYWORD SHORTCUT" : L"SEARCH URL  ({query} = search query)";
+        const auto labelRect = D2D1::RectF(box.left, box.top - 16.0f, box.right, box.top - 2.0f);
+        const auto labelColor = highContrast_
+            ? (focused ? SystemColor(COLOR_HIGHLIGHT) : SystemColor(COLOR_WINDOWTEXT))
+            : (focused ? D2D1::ColorF(0x6EA8FE) : D2D1::ColorF(1, 1, 1, 0.45f));
+        Text(label, labelRect, hintFormat_.Get(), labelColor);
+
+        // 2. Box background and border
+        const auto boxRect = D2D1::RoundedRect(box, 5.0f, 5.0f);
+        if (highContrast_) {
+            Fill(box, focused ? SystemColor(COLOR_WINDOW) : SystemColor(COLOR_BTNFACE), 5.0f);
+            brush_->SetColor(focused ? SystemColor(COLOR_HIGHLIGHT) : SystemColor(COLOR_WINDOWTEXT));
+            target_->DrawRoundedRectangle(boxRect, brush_.Get(), focused ? 1.5f : 1.0f);
+        } else {
+            if (focused) {
+                Fill(box, D2D1::ColorF(0, 0, 0, 0.35f), 5.0f);
+                brush_->SetColor(D2D1::ColorF(0x6EA8FE));
+                target_->DrawRoundedRectangle(boxRect, brush_.Get(), 1.5f);
+            } else if (hovered) {
+                Fill(box, D2D1::ColorF(1, 1, 1, 0.05f), 5.0f);
+                brush_->SetColor(D2D1::ColorF(1, 1, 1, 0.22f));
+                target_->DrawRoundedRectangle(boxRect, brush_.Get(), 1.0f);
+            } else {
+                Fill(box, D2D1::ColorF(0, 0, 0, 0.22f), 5.0f);
+                brush_->SetColor(D2D1::ColorF(1, 1, 1, 0.12f));
+                target_->DrawRoundedRectangle(boxRect, brush_.Get(), 1.0f);
+            }
         }
-        const wchar_t* placeholder = field == 0 ? L"Engine name"
-            : field == 1 ? L"Keyword, e.g. g" : L"https://example.com/?q={query}";
-        target_->PushAxisAlignedClip(box, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+        // 3. Text & Placeholder inside the box (padded 8px horizontally)
+        const auto textClip = D2D1::RectF(box.left + 8.0f, box.top, box.right - 8.0f, box.bottom);
+        target_->PushAxisAlignedClip(textClip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        const wchar_t* placeholder = field == 0 ? L"e.g. Google"
+            : field == 1 ? L"e.g. g" : L"https://example.com/search?q={query}";
         auto layout = Layout(input.text.empty() ? std::wstring(placeholder) : input.text,
             hintFormat_.Get(), 32768);
         if (layout) {
             DWRITE_TEXT_METRICS metrics{};
             layout->GetMetrics(&metrics);
-            const float textTop = box.top + (box.bottom - box.top - metrics.height) / 2;
-            const float avail = box.right - box.left;
+            const float textTop = box.top + (box.bottom - box.top - metrics.height) / 2.0f;
+            const float avail = textClip.right - textClip.left;
             float caretX = 0, y = 0;
             DWRITE_HIT_TEST_METRICS hit{};
             layout->HitTestTextPosition(static_cast<UINT32>(input.caret), FALSE, &caretX, &y, &hit);
             if (focused) {
-                urlScroll_ = (std::max)(0.0f, (std::max)(caretX - avail + 8,
-                    (std::min)(urlScroll_, caretX - 4)));
+                urlScroll_ = (std::max)(0.0f, (std::max)(caretX - avail + 8.0f,
+                    (std::min)(urlScroll_, caretX - 4.0f)));
             }
             brush_->SetColor(input.text.empty() ? Muted() : Foreground());
-            target_->DrawTextLayout(D2D1::Point2F(box.left - (focused ? urlScroll_ : 0.0f), textTop),
+            target_->DrawTextLayout(D2D1::Point2F(textClip.left - (focused ? urlScroll_ : 0.0f), textTop),
                 layout.Get(), brush_.Get());
             if (focused) {
                 if (input.HasSelection()) {
                     UINT32 count = 0;
                     layout->HitTestTextRange(static_cast<UINT32>(input.Start()),
                         static_cast<UINT32>(input.End() - input.Start()),
-                        box.left - urlScroll_, textTop, nullptr, 0, &count);
+                        textClip.left - urlScroll_, textTop, nullptr, 0, &count);
                     std::vector<DWRITE_HIT_TEST_METRICS> selections(count);
                     if (count && SUCCEEDED(layout->HitTestTextRange(static_cast<UINT32>(input.Start()),
                             static_cast<UINT32>(input.End() - input.Start()),
-                            box.left - urlScroll_, textTop,
+                            textClip.left - urlScroll_, textTop,
                             selections.data(), count, &count))) {
                         for (const auto& sel : selections) {
                             Fill(D2D1::RectF(sel.left, sel.top, sel.left + sel.width, sel.top + sel.height),
@@ -4226,7 +4472,7 @@ private:
                     }
                 }
                 if (caretVisible_ && GetFocus() == hwnd_) {
-                    const float cx = box.left + caretX - urlScroll_;
+                    const float cx = textClip.left + caretX - urlScroll_;
                     Fill(D2D1::RectF(cx, textTop, cx + 1.0f, textTop + metrics.height),
                         Foreground(), 0.5f);
                 }
@@ -4279,6 +4525,8 @@ private:
                     D2D1::ColorF(1, 1, 1, 0.08f), 6.0f);
             }
             if (editing) {
+                brush_->SetColor(highContrast_ ? Foreground() : D2D1::ColorF(1, 1, 1, 0.10f));
+                target_->DrawRoundedRectangle(D2D1::RoundedRect(rowRect, 6.0f, 6.0f), brush_.Get(), 1.0f);
                 for (int field = 0; field < 3; ++field) {
                     DrawEditField(EngineEditFieldRect(i, field), field);
                 }
@@ -4409,7 +4657,6 @@ private:
     bool updateDownloaded_ = false;
     std::wstring downloadedUpdatePath_;
     bool updateHovered_ = false;
-    bool webSearchCardHovered_ = false;
     bool adminActionHovered_ = false;
     std::atomic<bool> updateInProgress_{false};
     std::thread updateThread_;
