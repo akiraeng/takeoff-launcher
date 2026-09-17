@@ -1305,11 +1305,11 @@ private:
     enum class SettingsCategory : uint8_t { All, Shortcuts, System, Search, About };
 
     static bool IsRowInCategory(int row, SettingsCategory cat) {
-        if (cat == SettingsCategory::All) return row >= 0 && row <= 9;
+        if (cat == SettingsCategory::All) return row >= 0 && row <= 11;
         if (cat == SettingsCategory::Shortcuts) return row >= 0 && row <= 3;
         if (cat == SettingsCategory::System) return row >= 4 && row <= 6;
         if (cat == SettingsCategory::Search) return row >= 7 && row <= 8;
-        if (cat == SettingsCategory::About) return row == 9;
+        if (cat == SettingsCategory::About) return row >= 9 && row <= 11;
         return false;
     }
 
@@ -1325,15 +1325,15 @@ private:
         if (cat == SettingsCategory::Shortcuts) return 3;
         if (cat == SettingsCategory::System) return 6;
         if (cat == SettingsCategory::Search) return 8;
-        if (cat == SettingsCategory::About) return 9;
-        return 9;
+        if (cat == SettingsCategory::About) return 11;
+        return 11;
     }
 
-    static constexpr int kResetButtonRow = 10;
+    static constexpr int kResetButtonRow = 100;
 
     int NextSettingsRow(int current, int delta) const {
         std::vector<int> activeRows;
-        for (int r = 0; r <= 9; ++r) {
+        for (int r = 0; r <= 11; ++r) {
             if (IsRowInCategory(r, settingsCategory_)) {
                 activeRows.push_back(r);
             }
@@ -1376,7 +1376,7 @@ private:
 
     float SettingsContentBottom() const {
         if (settingsCategory_ == SettingsCategory::All) {
-            return 636.0f;
+            return 732.0f;
         } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
             return 240.0f;
         } else if (settingsCategory_ == SettingsCategory::System) {
@@ -1384,7 +1384,7 @@ private:
         } else if (settingsCategory_ == SettingsCategory::Search) {
             return 146.0f;
         } else if (settingsCategory_ == SettingsCategory::About) {
-            return 100.0f;
+            return 260.0f;
         }
         return 200.0f;
     }
@@ -1414,7 +1414,7 @@ private:
         } else if (settingsCategory_ == SettingsCategory::Search) {
             return 36.0f + (row - 7) * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::About) {
-            return 36.0f + (row - 9) * kSettingsRowHeight;
+            return 108.0f + (row - 9) * kSettingsRowHeight;
         }
         return 0.0f;
     }
@@ -1423,7 +1423,7 @@ private:
         if (x < 16.0f || x > width_ - 16.0f) return -1;
         if (y < kSettingsHeaderHeight || y >= FooterTop()) return -1;
         const float contentY = (y - kSettingsHeaderHeight) + settingsScroll_;
-        for (int r = 0; r <= 9; ++r) {
+        for (int r = 0; r <= 11; ++r) {
             if (!IsRowInCategory(r, settingsCategory_)) continue;
             const float rTop = SettingsRowTop(r);
             if (contentY >= rTop && contentY < rTop + kSettingsRowHeight) {
@@ -1447,7 +1447,7 @@ private:
             settingsScroll_ = 0.0f;
             return;
         }
-        if (row < 0 || row > 9 || !IsRowInCategory(row, settingsCategory_)) return;
+        if (row < 0 || row > 11 || !IsRowInCategory(row, settingsCategory_)) return;
         const float rTop = SettingsRowTop(row);
         const float rBottom = rTop + kSettingsRowHeight;
         const float maxScroll = SettingsMaxScroll();
@@ -1456,9 +1456,11 @@ private:
             if (row == 0) sectionHeaderTop = 16.0f;
             else if (row == 4) sectionHeaderTop = 242.0f;
             else if (row == 7) sectionHeaderTop = 421.0f;
-            else if (row == 9) sectionHeaderTop = 554.0f;
+            else if (row >= 9) sectionHeaderTop = 554.0f;
+        } else if (settingsCategory_ == SettingsCategory::About) {
+            sectionHeaderTop = 18.0f;
         } else {
-            if (row == 0 || row == 4 || row == 7 || row == 9) sectionHeaderTop = 16.0f;
+            if (row == 0 || row == 4 || row == 7) sectionHeaderTop = 16.0f;
         }
         const float visibleTop = sectionHeaderTop;
         const float visibleBottom = rBottom + 8.0f;
@@ -1745,7 +1747,15 @@ private:
             break;
         case 9:
             ShellExecuteW(nullptr, L"open", takeoff::kGitHubRepoUrl, nullptr, nullptr, SW_SHOWNORMAL);
-            settingsStatus_ = L"Opened GitHub project in browser";
+            settingsStatus_ = L"Opened GitHub repository in browser";
+            break;
+        case 10:
+            ShellExecuteW(nullptr, L"open", releasesUrl_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            settingsStatus_ = L"Opened release notes in browser";
+            break;
+        case 11:
+            ShellExecuteW(nullptr, L"open", takeoff::kDefaultLicenseUrl, nullptr, nullptr, SW_SHOWNORMAL);
+            settingsStatus_ = L"Opened MIT license in browser";
             break;
         }
         InvalidateRect(hwnd_, nullptr, FALSE);
@@ -4434,21 +4444,78 @@ private:
             }
         }
 
-        if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::About) {
-            const float hY = (settingsCategory_ == SettingsCategory::All) ? 554.0f : 16.0f;
-            const float cY = (settingsCategory_ == SettingsCategory::All) ? 574.0f : 36.0f;
-            drawCard(L"ABOUT", hY, cY, 1);
+        auto drawCommunityRow = [this, offsetY](int row, float rowTop) {
+            std::wstring_view title;
+            std::wstring_view desc;
+            std::wstring_view linkText;
+            if (row == 9) {
+                title = L"GitHub";
+                desc = L"Issues, feature requests, and source code";
+                linkText = L"akiraeng/takeoff-launcher \u2197";
+            } else if (row == 10) {
+                title = L"Release notes";
+                desc = L"Version changelog and release history";
+                linkText = L"Releases \u2197";
+            } else {
+                title = L"License";
+                desc = L"Open source under the MIT License";
+                linkText = L"MIT License \u2197";
+            }
+            DrawSettingsRow(row, rowTop, title, desc);
+            const bool selected = (settingsSelected_ == row);
+            Text(linkText,
+                D2D1::RectF(width_ - 360, rowTop + 4, width_ - 36, rowTop + 26),
+                hintFormat_.Get(),
+                highContrast_ && selected ? SystemColor(COLOR_HIGHLIGHTTEXT) : D2D1::ColorF(0x6EA8FE),
+                DWRITE_TEXT_ALIGNMENT_TRAILING);
+        };
 
-            DrawSettingsRow(9, cY + offsetY, L"GitHub project",
-                L"Open repository to submit pull requests, report bugs, or contribute");
-            {
-                const float rowTop = cY + offsetY;
-                const bool selected = (settingsSelected_ == 9);
-                Text(L"github.com/akiraeng/takeoff-launcher \u2197",
-                    D2D1::RectF(width_ - 360, rowTop + 4, width_ - 36, rowTop + 26),
-                    hintFormat_.Get(),
-                    highContrast_ && selected ? SystemColor(COLOR_HIGHLIGHTTEXT) : D2D1::ColorF(0x6EA8FE),
-                    DWRITE_TEXT_ALIGNMENT_TRAILING);
+        if (settingsCategory_ == SettingsCategory::All) {
+            const float hY = 554.0f;
+            const float cY = 574.0f;
+            drawCard(L"COMMUNITY & CODE", hY, cY, 3);
+            for (int r = 9; r <= 11; ++r) {
+                drawCommunityRow(r, cY + (r - 9) * kSettingsRowHeight + offsetY);
+            }
+        } else if (settingsCategory_ == SettingsCategory::About) {
+            // Hero branding
+            const float heroTop = 18.0f + offsetY;
+            float titleWidth = 84.0f;
+            if (auto layout = Layout(L"Takeoff", calcResultFormat_.Get(), 400.0f)) {
+                DWRITE_TEXT_METRICS metrics{};
+                if (SUCCEEDED(layout->GetMetrics(&metrics))) {
+                    titleWidth = metrics.widthIncludingTrailingWhitespace;
+                }
+            }
+            Text(L"Takeoff", D2D1::RectF(24, heroTop, 24 + titleWidth, heroTop + 30.0f),
+                calcResultFormat_.Get(), Foreground());
+
+            // Version pill badge next to title
+            const std::wstring versionStr = std::wstring(L"v") + takeoff::kAppVersion;
+            float versionW = 44.0f;
+            if (auto layout = Layout(versionStr, hintFormat_.Get(), 200.0f)) {
+                DWRITE_TEXT_METRICS metrics{};
+                if (SUCCEEDED(layout->GetMetrics(&metrics))) {
+                    versionW = metrics.widthIncludingTrailingWhitespace + 14.0f;
+                }
+            }
+            const auto pillRect = D2D1::RectF(24 + titleWidth + 10.0f, heroTop + 5.0f,
+                24 + titleWidth + 10.0f + versionW, heroTop + 24.0f);
+            Fill(pillRect, highContrast_ ? SystemColor(COLOR_BTNFACE) : D2D1::ColorF(1, 1, 1, 0.08f), 4.0f);
+            brush_->SetColor(highContrast_ ? Foreground() : D2D1::ColorF(1, 1, 1, 0.12f));
+            target_->DrawRoundedRectangle(D2D1::RoundedRect(pillRect, 4.0f, 4.0f), brush_.Get(), 1.0f);
+            Text(versionStr, pillRect, hintFormat_.Get(), Muted(), DWRITE_TEXT_ALIGNMENT_CENTER);
+
+            // Tagline below title
+            Text(L"Fast, native application launcher for Windows",
+                D2D1::RectF(24, heroTop + 32.0f, width_ - 24, heroTop + 50.0f),
+                hintFormat_.Get(), Muted());
+
+            // Community card (rows 9..11)
+            const float cY = 108.0f;
+            drawCard(L"COMMUNITY & CODE", 88.0f, cY, 3);
+            for (int r = 9; r <= 11; ++r) {
+                drawCommunityRow(r, cY + (r - 9) * kSettingsRowHeight + offsetY);
             }
         }
 
