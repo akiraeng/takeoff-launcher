@@ -4,6 +4,7 @@
 #include "../src/updates.h"
 #include "../src/file_index.h"
 #include "../src/calculator.h"
+#include "../src/power.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -1014,5 +1015,95 @@ int main() {
         Check(mockApps[results[0]].parameters == L"125 * 8", "parameters stores original expression");
     }
 
-    std::cout << "All search, calculator, text editing, hotkey, and settings scroll checks passed in " << elapsed << "ms.\n";
+    // 13. Power & System Control commands
+    {
+        // Identification
+        Check(IsPowerCommand(L"takeoff:power:shutdown"), "power command shutdown recognized");
+        Check(IsPowerCommand(L"takeoff:power:restart"), "power command restart recognized");
+        Check(IsPowerCommand(L"takeoff:power:sleep"), "power command sleep recognized");
+        Check(IsPowerCommand(L"takeoff:power:hibernate"), "power command hibernate recognized");
+        Check(IsPowerCommand(L"takeoff:power:lock"), "power command lock recognized");
+        Check(IsPowerCommand(L"takeoff:power:signout"), "power command signout recognized");
+        Check(!IsPowerCommand(L"notepad.exe"), "regular app is not power command");
+        Check(!IsPowerCommand(L"ms-settings:powersleep"), "ms-settings is not power command");
+        Check(!IsPowerCommand(L""), "empty path is not power command");
+
+        // Action parsing
+        PowerAction action{};
+        Check(ParsePowerAction(L"takeoff:power:shutdown", action) && action == PowerAction::Shutdown,
+            "parse shutdown");
+        Check(ParsePowerAction(L"takeoff:power:restart", action) && action == PowerAction::Restart,
+            "parse restart");
+        Check(ParsePowerAction(L"takeoff:power:sleep", action) && action == PowerAction::Sleep,
+            "parse sleep");
+        Check(ParsePowerAction(L"takeoff:power:hibernate", action) && action == PowerAction::Hibernate,
+            "parse hibernate");
+        Check(ParsePowerAction(L"takeoff:power:lock", action) && action == PowerAction::Lock,
+            "parse lock");
+        Check(ParsePowerAction(L"takeoff:power:signout", action) && action == PowerAction::SignOut,
+            "parse signout");
+        Check(ParsePowerAction(L"takeoff:power:logoff", action) && action == PowerAction::SignOut,
+            "parse logoff alias");
+        // Icon info validation
+        const auto shutDownIcon = GetPowerIconInfo(PowerAction::Shutdown);
+        Check(shutDownIcon.backgroundColor == 0xDC2626 && wcscmp(shutDownIcon.glyph, L"\uE7E8") == 0,
+            "shutdown icon info");
+        const auto restartIcon = GetPowerIconInfo(PowerAction::Restart);
+        Check(restartIcon.backgroundColor == 0xEA580C && wcscmp(restartIcon.glyph, L"\uE777") == 0,
+            "restart icon info");
+        const auto sleepIcon = GetPowerIconInfo(PowerAction::Sleep);
+        Check(sleepIcon.backgroundColor == 0x4F46E5 && wcscmp(sleepIcon.glyph, L"\uE708") == 0,
+            "sleep icon info");
+        const auto hibernateIcon = GetPowerIconInfo(PowerAction::Hibernate);
+        Check(hibernateIcon.backgroundColor == 0x0D9488 && wcscmp(hibernateIcon.glyph, L"\uE7C8") == 0,
+            "hibernate icon info");
+        const auto lockIcon = GetPowerIconInfo(PowerAction::Lock);
+        Check(lockIcon.backgroundColor == 0x7C3AED && wcscmp(lockIcon.glyph, L"\uE72E") == 0,
+            "lock icon info");
+        const auto signoutIcon = GetPowerIconInfo(PowerAction::SignOut);
+        Check(signoutIcon.backgroundColor == 0xBE185D && wcscmp(signoutIcon.glyph, L"\uE7E7") == 0,
+            "signout icon info");
+
+        // Dry-run execution
+        Check(ExecutePowerCommand(L"takeoff:power:shutdown", true), "dry-run shutdown");
+        Check(ExecutePowerCommand(L"takeoff:power:restart", true), "dry-run restart");
+        Check(ExecutePowerCommand(L"takeoff:power:sleep", true), "dry-run sleep");
+        Check(ExecutePowerCommand(L"takeoff:power:hibernate", true), "dry-run hibernate");
+        Check(ExecutePowerCommand(L"takeoff:power:lock", true), "dry-run lock");
+        Check(ExecutePowerCommand(L"takeoff:power:signout", true), "dry-run signout");
+        Check(!ExecutePowerCommand(L"takeoff:power:unknown", true), "unknown power command rejected");
+
+        // Search and scoring invariants
+        std::vector<std::wstring> shutDownAliases = {L"shutdown", L"shut down", L"power off", L"turn off", L"power"};
+        Check(ScoreApp(L"shut down", shutDownAliases, L"shutdown") >= 9500, "query shutdown matches shut down");
+        Check(ScoreApp(L"shut down", shutDownAliases, L"shut down") == 10000, "query shut down exact match");
+        Check(ScoreApp(L"shut down", shutDownAliases, L"power off") >= 9500, "query power off matches shut down");
+        Check(ScoreApp(L"shut down", shutDownAliases, L"power") > 0, "query power matches shut down");
+
+        std::vector<std::wstring> restartAliases = {L"restart", L"reboot", L"reset", L"restart pc"};
+        Check(ScoreApp(L"restart", restartAliases, L"restart") == 10000, "query restart exact match");
+        Check(ScoreApp(L"restart", restartAliases, L"reboot") >= 9500, "query reboot matches restart");
+
+        std::vector<std::wstring> sleepAliases = {L"sleep", L"suspend", L"standby"};
+        Check(ScoreApp(L"sleep", sleepAliases, L"sleep") == 10000, "query sleep exact match");
+        Check(ScoreApp(L"sleep", sleepAliases, L"suspend") >= 9500, "query suspend matches sleep");
+        Check(ScoreApp(L"sleep", sleepAliases, L"standby") >= 9500, "query standby matches sleep");
+
+        std::vector<std::wstring> hibernateAliases = {L"hibernate", L"hibernation", L"deep sleep"};
+        Check(ScoreApp(L"hibernate", hibernateAliases, L"hibernate") == 10000, "query hibernate exact match");
+        Check(ScoreApp(L"hibernate", hibernateAliases, L"hibernation") >= 9500, "query hibernation matches hibernate");
+
+        std::vector<std::wstring> lockAliases = {L"lock", L"lock pc", L"lock workstation"};
+        Check(ScoreApp(L"lock", lockAliases, L"lock") == 10000, "query lock exact match");
+        Check(ScoreApp(L"lock", lockAliases, L"lock pc") >= 9500, "query lock pc matches lock");
+        Check(ScoreApp(L"lock", lockAliases, L"lock") > ScoreApp(L"lock screen", {}, L"lock"),
+            "exact lock beats lock screen settings on query lock");
+
+        std::vector<std::wstring> signoutAliases = {L"sign out", L"signout", L"log off", L"logoff", L"logout"};
+        Check(ScoreApp(L"sign out", signoutAliases, L"sign out") == 10000, "query sign out exact match");
+        Check(ScoreApp(L"sign out", signoutAliases, L"log off") >= 9500, "query log off matches sign out");
+        Check(ScoreApp(L"sign out", signoutAliases, L"signout") >= 9500, "query signout matches sign out");
+    }
+
+    std::cout << "All search, calculator, text editing, hotkey, power commands, and settings scroll checks passed in " << elapsed << "ms.\n";
 }

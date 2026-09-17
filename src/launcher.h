@@ -2,6 +2,7 @@
 
 // Included by main.cpp inside its private namespace.
 #include "websearch.h"
+#include "power.h"
 class LauncherWindow {
 public:
     bool Create(HINSTANCE instance) {
@@ -16,6 +17,7 @@ public:
             !CreateFormat(14.0f, DWRITE_FONT_WEIGHT_MEDIUM, resultFormat_) ||
             !CreateFormat(12.0f, DWRITE_FONT_WEIGHT_NORMAL, hintFormat_) ||
             !CreateFormat(22.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, calcResultFormat_)) return false;
+        CreateSymbolFormat(13.0f, symbolFormat_);
 
         WNDCLASSEXW windowClass{sizeof(windowClass)};
         windowClass.style = CS_DBLCLKS;
@@ -2376,6 +2378,22 @@ private:
         }
         const std::wstring& path = app.path;
         Hide();
+        if (takeoff::IsPowerCommand(path)) {
+            if (takeoff::ExecutePowerCommand(path)) {
+                recent_.erase(std::remove(recent_.begin(), recent_.end(), index), recent_.end());
+                recent_.insert(recent_.begin(), index);
+                if (recent_.size() > 8) recent_.resize(8);
+                SaveRecent();
+            } else {
+                ShowWindow(hwnd_, SW_SHOWNORMAL);
+                SetForegroundWindow(hwnd_);
+                SetFocus(hwnd_);
+                status_ = L"Could not execute power command.";
+                ResetCaret();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return;
+        }
         const bool isProtocol = path.rfind(L"ms-settings:", 0) == 0 || path.rfind(L"shell:", 0) == 0;
         const bool isCpl = (path.size() >= 4 &&
             (_wcsicmp(path.c_str() + path.size() - 4, L".cpl") == 0));
@@ -2529,6 +2547,18 @@ private:
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return;
             }
+        }
+        if (takeoff::IsPowerCommand(app.path)) {
+            if (action == 0) {
+                LaunchSelected(false);
+                return;
+            }
+            const bool copied = CopyText(app.name);
+            status_ = copied ? (action == 1 ? L"Command name copied" : L"Command copied")
+                             : L"Clipboard is busy. Try again.";
+            ResetCaret();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
         }
         if (action == 0) { LaunchSelected(true); return; }
         const bool copied = CopyText(action == 1 ? app.name : app.path);
@@ -2897,6 +2927,28 @@ private:
         return true;
     }
 
+    bool CreateSymbolFormat(float size, ComPtr<IDWriteTextFormat>& format) {
+        if (SUCCEEDED(writeFactory_->CreateTextFormat(L"Segoe Fluent Icons", nullptr,
+                DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                size, L"", &format))) {
+            format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            return true;
+        }
+        if (SUCCEEDED(writeFactory_->CreateTextFormat(L"Segoe MDL2 Assets", nullptr,
+                DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                size, L"", &format))) {
+            format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            return true;
+        }
+        if (SUCCEEDED(writeFactory_->CreateTextFormat(L"Segoe UI Symbol", nullptr,
+                DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                size, L"", &format))) {
+            format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            return true;
+        }
+        return false;
+    }
+
     ComPtr<IDWriteTextLayout> Layout(std::wstring_view text, IDWriteTextFormat* format,
         float width, float height = 64) const {
         ComPtr<IDWriteTextLayout> layout;
@@ -2929,6 +2981,7 @@ private:
         const int end = (std::min)(firstVisible_ + visibleRows_, static_cast<int>(results_.size()));
         for (int i = firstVisible_; i < end; ++i) {
             const AppEntry& app = apps_[results_[i]];
+            if (takeoff::IsPowerCommand(app.path)) continue;
             const std::wstring& lookupPath = !app.iconPath.empty() ? app.iconPath : app.path;
             if (iconCache_.find(lookupPath) != iconCache_.end() || iconPending_.count(lookupPath)) continue;
             iconPending_.insert(lookupPath);
@@ -3490,6 +3543,25 @@ private:
                 const float answerLeft = (std::max)(leftTextRight + 8.0f, width_ - rightAnswerWidth);
                 Text(app.name, D2D1::RectF(answerLeft, top, answerRight, top + rowHeight - 2),
                     calcResultFormat_.Get(), textColor, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            } else if (takeoff::IsPowerCommand(app.path)) {
+                const auto iconRect = D2D1::RectF(20, top + 7, 46, top + 33);
+                takeoff::PowerAction pAction{};
+                if (takeoff::ParsePowerAction(app.path, pAction)) {
+                    const auto iconInfo = takeoff::GetPowerIconInfo(pAction);
+                    Fill(iconRect, D2D1::ColorF(iconInfo.backgroundColor), 6);
+                    Text(iconInfo.glyph, iconRect,
+                        symbolFormat_ ? symbolFormat_.Get() : resultFormat_.Get(),
+                        D2D1::ColorF(0xFFFFFF), DWRITE_TEXT_ALIGNMENT_CENTER);
+                } else {
+                    Fill(iconRect, D2D1::ColorF(0xDC2626), 6);
+                }
+                Text(app.name, D2D1::RectF(60, top, width_ - 158, top + 40), resultFormat_.Get(), textColor);
+                const bool recent = input_.text.empty() &&
+                    std::find(recent_.begin(), recent_.end(), results_[i]) != recent_.end();
+                const wchar_t* categoryLabel = recent ? L"Recent" : L"System";
+                Text(categoryLabel,
+                    D2D1::RectF(width_ - 154, top, width_ - 28, top + 40), hintFormat_.Get(),
+                    highContrast_ && selected ? textColor : Muted(), DWRITE_TEXT_ALIGNMENT_TRAILING);
             } else {
                 const std::wstring& lookupPath = !app.iconPath.empty() ? app.iconPath : app.path;
                 const auto iconRect = D2D1::RectF(20, top + 7, 46, top + 33);
@@ -3572,7 +3644,7 @@ private:
     bool PointInAdminAction(float x, float y) const {
         if (page_ != Page::Launcher || !HasResult()) return false;
         const AppEntry& app = apps_[results_[selected_]];
-        if (app.category == takeoff::AppCategory::Calculator) return false;
+        if (app.category == takeoff::AppCategory::Calculator || takeoff::IsPowerCommand(app.path)) return false;
         if (settings_.administratorHotkey.disabled) return false;
         const float top = FooterTop();
         if (y < top || y > height_) return false;
@@ -3773,6 +3845,10 @@ private:
                 Text(L"Copy result", D2D1::RectF(24, top, 156, height_),
                     hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
                 Key(L"\u21B5", 96, top + (kFooterHeight - 22) / 2, 24);
+            } else if (takeoff::IsPowerCommand(app.path)) {
+                Text(L"Execute", D2D1::RectF(24, top, 156, height_),
+                    hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
+                Key(L"\u21B5", 76, top + (kFooterHeight - 22) / 2, 24);
             } else {
                 const bool adminHover = mouseKnown_ && PointInAdminAction(mouseX_, mouseY_);
                 Text(L"Open as Administrator", D2D1::RectF(24, top, 156, height_),
@@ -3835,10 +3911,14 @@ private:
         const bool isCalc = (app.category == takeoff::AppCategory::Calculator);
         const bool isFileOrFolder = (app.category == takeoff::AppCategory::File ||
                                      app.category == takeoff::AppCategory::Folder);
+        const bool isPower = takeoff::IsPowerCommand(app.path);
         const wchar_t* appLabels[] = {L"Open as Administrator", L"Copy app name", L"Copy launch path"};
         const wchar_t* fileLabels[] = {L"Open", L"Open containing folder", L"Copy file path"};
         const wchar_t* calcLabels[] = {L"Copy result", L"Copy calculation", L"Open Windows Calculator"};
-        const wchar_t** labels = isCalc ? calcLabels : (isFileOrFolder ? fileLabels : appLabels);
+        const wchar_t* powerLabels[] = {L"Execute", L"Copy command name", L"Copy command"};
+        const wchar_t** labels = isCalc ? calcLabels
+            : (isFileOrFolder ? fileLabels
+            : (isPower ? powerLabels : appLabels));
         for (int i = 0; i < 3; ++i) {
             const float top = rect.top + 32 + i * 36;
             const auto row = D2D1::RectF(rect.left + 6, top, rect.right - 6, top + 34);
@@ -4291,7 +4371,7 @@ private:
     ComPtr<IDWriteFactory> writeFactory_;
     ComPtr<ID2D1HwndRenderTarget> target_;
     ComPtr<ID2D1SolidColorBrush> brush_;
-    ComPtr<IDWriteTextFormat> searchFormat_, resultFormat_, hintFormat_, calcResultFormat_;
+    ComPtr<IDWriteTextFormat> searchFormat_, resultFormat_, hintFormat_, calcResultFormat_, symbolFormat_;
     std::unordered_map<std::wstring, IconEntry> iconCache_;
     std::thread iconThread_;
     std::mutex iconMutex_;

@@ -32,6 +32,7 @@
 #include "updates.h"
 #include "file_index.h"
 #include "calculator.h"
+#include "power.h"
 
 namespace fs = std::filesystem;
 using Microsoft::WRL::ComPtr;
@@ -390,6 +391,20 @@ void AddSystemItems(std::vector<AppEntry>& apps) {
             {L"appwiz.cpl", L"programs and features", L"uninstall", L"add remove programs"}, true, L"appwiz.cpl"},
         {L"Power Options", sysDir + L"\\control.exe", sysDir + L"\\powercfg.cpl",
             {L"powercfg.cpl", L"power options", L"power plan", L"sleep settings"}, true, L"powercfg.cpl"},
+
+        // --- Windows Power & System Control Commands ---
+        {L"Shut Down", L"takeoff:power:shutdown", sysDir + L"\\shutdown.exe",
+            {L"shutdown", L"shut down", L"power off", L"turn off", L"power"}, false},
+        {L"Restart", L"takeoff:power:restart", sysDir + L"\\shutdown.exe",
+            {L"restart", L"reboot", L"reset", L"restart pc"}, false},
+        {L"Sleep", L"takeoff:power:sleep", sysDir + L"\\powercfg.cpl",
+            {L"sleep", L"suspend", L"standby"}, false},
+        {L"Hibernate", L"takeoff:power:hibernate", sysDir + L"\\powercfg.cpl",
+            {L"hibernate", L"hibernation", L"deep sleep"}, false},
+        {L"Lock", L"takeoff:power:lock", sysDir + L"\\user32.dll",
+            {L"lock", L"lock pc", L"lock workstation"}, false},
+        {L"Sign Out", L"takeoff:power:signout", sysDir + L"\\shell32.dll",
+            {L"sign out", L"signout", L"log off", L"logoff", L"logout"}, false},
     };
 
     for (const auto& def : items) {

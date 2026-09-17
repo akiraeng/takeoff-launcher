@@ -73,6 +73,7 @@
     <ClInclude Include="src\settings.h" />
     <ClInclude Include="src\updates.h" />
     <ClInclude Include="src\calculator.h" />
+    <ClInclude Include="src\power.h" />
   </ItemGroup>
   <ItemGroup>
     <Manifest Include="src\Takeoff.manifest" />

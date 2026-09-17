@@ -11,6 +11,7 @@ add_executable(${target} WIN32
     src/websearch.h
     src/updates.h
     src/calculator.h
+    src/power.h
     src/Takeoff.manifest
     src/Takeoff.rc
 )
