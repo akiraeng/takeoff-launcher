@@ -35,6 +35,7 @@
   wu       → Windows Update
   dev man  → Device Manager
   ```
+* **Pinyin Search for Chinese Programs** — Seamlessly search applications with Chinese names using Pinyin initials (简拼), full Pinyin (全拼), or mixed queries (e.g. `wx` or `weixin` for 微信, `wyyyy` for 网易云音乐, `jsq` or `jisuanqi` for 计算器, `qqyy` for QQ音乐, `360aqws` for 360安全卫士). Can be enabled or disabled anytime in Settings.
 * **System Tools Included** — Instantly launch Control Panel applets, Windows Settings, Device Manager, and Services alongside desktop apps.
 * **Web Search with Keywords** — Search the web directly from the search bar using simple engine shortcuts (such as `g` for Google, `d` for DuckDuckGo, `yt` for YouTube, `b` for Bing, `gh` for GitHub, or `w` for Wikipedia). Press `Tab` to switch search engines. You can also add, edit, or reorder custom search engines in Settings.
 * **Power and System Commands** — Control your PC directly from search. Includes commands for Shut Down, Restart, Sleep, Hibernate, Lock, and Sign Out, along with common aliases like `reboot` and `power off`.

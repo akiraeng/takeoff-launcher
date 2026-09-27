@@ -33,6 +33,7 @@
 #include "file_index.h"
 #include "calculator.h"
 #include "power.h"
+#include "pinyin.h"
 
 namespace fs = std::filesystem;
 using Microsoft::WRL::ComPtr;
@@ -79,6 +80,7 @@ struct AppEntry {
     std::vector<std::wstring> aliases;
     std::wstring iconPath;
     std::wstring parameters;
+    std::vector<std::wstring> pinyinAliases;
 };
 
 struct RankedResult {
@@ -462,7 +464,8 @@ std::vector<AppEntry> BuildAppIndex() {
         const std::wstring sysDir(systemDirectory);
         for (const wchar_t* name : {L"Calculator", L"Calendar", L"Camera", L"Clock",
                 L"File Explorer", L"Firefox", L"Microsoft Edge", L"Notepad", L"Paint",
-                L"Photos", L"Settings", L"Visual Studio Code", L"Windows Terminal"}) {
+                L"Photos", L"Settings", L"Visual Studio Code", L"Windows Terminal",
+                L"微信", L"计算器", L"QQ音乐"}) {
             // Known system icons exercise WIC decoding without indexing personal apps.
             const wchar_t* icon = name == std::wstring_view(L"Calculator") ? L"\\calc.exe"
                 : name == std::wstring_view(L"Notepad") ? L"\\notepad.exe" : L"\\control.exe";
@@ -470,7 +473,8 @@ std::vector<AppEntry> BuildAppIndex() {
                                 name == std::wstring_view(L"Notepad") ||
                                 name == std::wstring_view(L"Settings") ||
                                 name == std::wstring_view(L"Windows Terminal") ||
-                                name == std::wstring_view(L"Paint"));
+                                name == std::wstring_view(L"Paint") ||
+                                name == std::wstring_view(L"计算器"));
             AppEntry entry{
                 name,
                 Normalize(name),
@@ -485,6 +489,11 @@ std::vector<AppEntry> BuildAppIndex() {
                 entry.aliases = {Normalize(L"wt"), Normalize(L"terminal")};
             }
             apps.push_back(std::move(entry));
+        }
+        for (auto& app : apps) {
+            if (takeoff::HasChinese(app.name)) {
+                app.pinyinAliases = takeoff::GeneratePinyinAliases(app.name);
+            }
         }
         return apps;
     }
@@ -581,6 +590,11 @@ std::vector<AppEntry> BuildAppIndex() {
         }
     }
     AddSystemItems(uniqueApps);
+    for (auto& app : uniqueApps) {
+        if (takeoff::HasChinese(app.name)) {
+            app.pinyinAliases = takeoff::GeneratePinyinAliases(app.name);
+        }
+    }
     std::sort(uniqueApps.begin(), uniqueApps.end(), [](const AppEntry& left, const AppEntry& right) {
         return CompareStringOrdinal(
             left.name.c_str(), -1, right.name.c_str(), -1, TRUE) == CSTR_LESS_THAN;

@@ -12,6 +12,8 @@ add_executable(${target} WIN32
     src/updates.h
     src/calculator.h
     src/power.h
+    src/pinyin.h
+    src/pinyin_data.h
     src/Takeoff.manifest
     src/Takeoff.rc
 )

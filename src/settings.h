@@ -42,6 +42,7 @@ struct Settings {
     bool showTrayIcon = true;
     bool checkForUpdates = true;
     bool enableFileSearch = true;
+    bool enablePinyinSearch = true;
     std::vector<SearchEngine> searchEngines = DefaultSearchEngines();
     int defaultEngine = 0;  // Last engine used; also the one the launcher starts with.
 };

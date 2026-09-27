@@ -667,6 +667,7 @@ private:
                 settings_.showTrayIcon = ReadDword(key, L"ShowTrayIcon", 1) != 0;
                 settings_.checkForUpdates = ReadDword(key, L"CheckForUpdates", 1) != 0;
                 settings_.enableFileSearch = ReadDword(key, L"FileSearchEnabled", 1) != 0;
+                settings_.enablePinyinSearch = ReadDword(key, L"PinyinSearchEnabled", 1) != 0;
                 legacyWebSearchEnabled = ReadDword(key, L"WebSearchEnabled", 1) != 0;
                 wchar_t urlBuf[512]{};
                 DWORD urlBufSize = sizeof(urlBuf);
@@ -820,6 +821,7 @@ private:
                 {L"ShowTrayIcon", settings_.showTrayIcon ? 1u : 0u},
                 {L"CheckForUpdates", settings_.checkForUpdates ? 1u : 0u},
                 {L"FileSearchEnabled", settings_.enableFileSearch ? 1u : 0u},
+                {L"PinyinSearchEnabled", settings_.enablePinyinSearch ? 1u : 0u},
                 {L"RunAtStartup", settings_.runAtStartup ? 1u : 0u},
             };
             bool saved = true;
@@ -1305,11 +1307,11 @@ private:
     enum class SettingsCategory : uint8_t { All, Shortcuts, System, Search, About };
 
     static bool IsRowInCategory(int row, SettingsCategory cat) {
-        if (cat == SettingsCategory::All) return row >= 0 && row <= 11;
+        if (cat == SettingsCategory::All) return row >= 0 && row <= 12;
         if (cat == SettingsCategory::Shortcuts) return row >= 0 && row <= 3;
         if (cat == SettingsCategory::System) return row >= 4 && row <= 6;
-        if (cat == SettingsCategory::Search) return row >= 7 && row <= 8;
-        if (cat == SettingsCategory::About) return row >= 9 && row <= 11;
+        if (cat == SettingsCategory::Search) return row >= 7 && row <= 9;
+        if (cat == SettingsCategory::About) return row >= 10 && row <= 12;
         return false;
     }
 
@@ -1317,23 +1319,23 @@ private:
         if (cat == SettingsCategory::Shortcuts) return 0;
         if (cat == SettingsCategory::System) return 4;
         if (cat == SettingsCategory::Search) return 7;
-        if (cat == SettingsCategory::About) return 9;
+        if (cat == SettingsCategory::About) return 10;
         return 0;
     }
 
     static int LastRowInCategory(SettingsCategory cat) {
         if (cat == SettingsCategory::Shortcuts) return 3;
         if (cat == SettingsCategory::System) return 6;
-        if (cat == SettingsCategory::Search) return 8;
-        if (cat == SettingsCategory::About) return 11;
-        return 11;
+        if (cat == SettingsCategory::Search) return 9;
+        if (cat == SettingsCategory::About) return 12;
+        return 12;
     }
 
     static constexpr int kResetButtonRow = 100;
 
     int NextSettingsRow(int current, int delta) const {
         std::vector<int> activeRows;
-        for (int r = 0; r <= 11; ++r) {
+        for (int r = 0; r <= 12; ++r) {
             if (IsRowInCategory(r, settingsCategory_)) {
                 activeRows.push_back(r);
             }
@@ -1376,13 +1378,13 @@ private:
 
     float SettingsContentBottom() const {
         if (settingsCategory_ == SettingsCategory::All) {
-            return 732.0f;
+            return 779.0f;
         } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
             return 240.0f;
         } else if (settingsCategory_ == SettingsCategory::System) {
             return 193.0f;
         } else if (settingsCategory_ == SettingsCategory::Search) {
-            return 146.0f;
+            return 193.0f;
         } else if (settingsCategory_ == SettingsCategory::About) {
             return 260.0f;
         }
@@ -1405,8 +1407,8 @@ private:
         if (settingsCategory_ == SettingsCategory::All) {
             if (row < 4) return 36.0f + row * kSettingsRowHeight;
             if (row < 7) return 262.0f + (row - 4) * kSettingsRowHeight;
-            if (row < 9) return 441.0f + (row - 7) * kSettingsRowHeight;
-            return 574.0f + (row - 9) * kSettingsRowHeight;
+            if (row < 10) return 441.0f + (row - 7) * kSettingsRowHeight;
+            return 621.0f + (row - 10) * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
             return 36.0f + row * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::System) {
@@ -1414,7 +1416,7 @@ private:
         } else if (settingsCategory_ == SettingsCategory::Search) {
             return 36.0f + (row - 7) * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::About) {
-            return 108.0f + (row - 9) * kSettingsRowHeight;
+            return 108.0f + (row - 10) * kSettingsRowHeight;
         }
         return 0.0f;
     }
@@ -1423,7 +1425,7 @@ private:
         if (x < 16.0f || x > width_ - 16.0f) return -1;
         if (y < kSettingsHeaderHeight || y >= FooterTop()) return -1;
         const float contentY = (y - kSettingsHeaderHeight) + settingsScroll_;
-        for (int r = 0; r <= 11; ++r) {
+        for (int r = 0; r <= 12; ++r) {
             if (!IsRowInCategory(r, settingsCategory_)) continue;
             const float rTop = SettingsRowTop(r);
             if (contentY >= rTop && contentY < rTop + kSettingsRowHeight) {
@@ -1447,7 +1449,7 @@ private:
             settingsScroll_ = 0.0f;
             return;
         }
-        if (row < 0 || row > 11 || !IsRowInCategory(row, settingsCategory_)) return;
+        if (row < 0 || row > 12 || !IsRowInCategory(row, settingsCategory_)) return;
         const float rTop = SettingsRowTop(row);
         const float rBottom = rTop + kSettingsRowHeight;
         const float maxScroll = SettingsMaxScroll();
@@ -1456,7 +1458,7 @@ private:
             if (row == 0) sectionHeaderTop = 16.0f;
             else if (row == 4) sectionHeaderTop = 242.0f;
             else if (row == 7) sectionHeaderTop = 421.0f;
-            else if (row >= 9) sectionHeaderTop = 554.0f;
+            else if (row >= 10) sectionHeaderTop = 601.0f;
         } else if (settingsCategory_ == SettingsCategory::About) {
             sectionHeaderTop = 18.0f;
         } else {
@@ -1612,7 +1614,14 @@ private:
                 if (it != recent_.end()) {
                     recencyRank = static_cast<int>(std::distance(recent_.begin(), it));
                 }
-                const int score = takeoff::ScoreApp(apps_[i].normalizedName, apps_[i].aliases, query, recencyRank);
+                static const std::vector<std::wstring> s_emptyAliases;
+                const int score = takeoff::ScoreApp(
+                    apps_[i].normalizedName,
+                    apps_[i].aliases,
+                    query,
+                    recencyRank,
+                    settings_.enablePinyinSearch ? apps_[i].pinyinAliases : s_emptyAliases
+                );
                 if (score >= 0) ranked.push_back({i, score});
             }
             if (settings_.enableFileSearch) {
@@ -1743,17 +1752,22 @@ private:
             UpdateResults();
             break;
         case 8:
-            OpenEnginesPage();
+            settings_.enablePinyinSearch = !settings_.enablePinyinSearch;
+            SaveSettings();
+            UpdateResults();
             break;
         case 9:
+            OpenEnginesPage();
+            break;
+        case 10:
             ShellExecuteW(nullptr, L"open", takeoff::kGitHubRepoUrl, nullptr, nullptr, SW_SHOWNORMAL);
             settingsStatus_ = L"Opened GitHub repository in browser";
             break;
-        case 10:
+        case 11:
             ShellExecuteW(nullptr, L"open", releasesUrl_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             settingsStatus_ = L"Opened release notes in browser";
             break;
-        case 11:
+        case 12:
             ShellExecuteW(nullptr, L"open", takeoff::kDefaultLicenseUrl, nullptr, nullptr, SW_SHOWNORMAL);
             settingsStatus_ = L"Opened MIT license in browser";
             break;
@@ -4418,14 +4432,16 @@ private:
         if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Search) {
             const float hY = (settingsCategory_ == SettingsCategory::All) ? 421.0f : 16.0f;
             const float cY = (settingsCategory_ == SettingsCategory::All) ? 441.0f : 36.0f;
-            drawCard(L"SEARCH & FEATURES", hY, cY, 2);
+            drawCard(L"SEARCH & FEATURES", hY, cY, 3);
 
             DrawSettingsRow(7, cY + offsetY, L"File search",
                 L"Search files and folders on your computer", {}, true, settings_.enableFileSearch);
-            DrawSettingsRow(8, cY + kSettingsRowHeight + offsetY, L"Search engines",
+            DrawSettingsRow(8, cY + kSettingsRowHeight + offsetY, L"Pinyin search",
+                L"Search Chinese program names using Pinyin", {}, true, settings_.enablePinyinSearch);
+            DrawSettingsRow(9, cY + 2 * kSettingsRowHeight + offsetY, L"Search engines",
                 L"Choose engines, switch while typing with Tab or keywords");
             {
-                const float rowTop = cY + kSettingsRowHeight + offsetY;
+                const float rowTop = cY + 2 * kSettingsRowHeight + offsetY;
                 const auto* engine = ActiveEngine();
                 std::wstring value;
                 if (engine) {
@@ -4436,7 +4452,7 @@ private:
                 } else {
                     value = L"(disabled)";
                 }
-                const bool selected = (settingsSelected_ == 8);
+                const bool selected = (settingsSelected_ == 9);
                 Text(value, D2D1::RectF(width_ - 260, rowTop + 4, width_ - 36, rowTop + 26),
                     hintFormat_.Get(),
                     highContrast_ && selected ? SystemColor(COLOR_HIGHLIGHTTEXT) : Muted(),
@@ -4448,11 +4464,11 @@ private:
             std::wstring_view title;
             std::wstring_view desc;
             std::wstring_view linkText;
-            if (row == 9) {
+            if (row == 10) {
                 title = L"GitHub";
                 desc = L"Issues, feature requests, and source code";
                 linkText = L"akiraeng/takeoff-launcher \u2197";
-            } else if (row == 10) {
+            } else if (row == 11) {
                 title = L"Release notes";
                 desc = L"Version changelog and release history";
                 linkText = L"Releases \u2197";
@@ -4471,11 +4487,11 @@ private:
         };
 
         if (settingsCategory_ == SettingsCategory::All) {
-            const float hY = 554.0f;
-            const float cY = 574.0f;
+            const float hY = 601.0f;
+            const float cY = 621.0f;
             drawCard(L"COMMUNITY & CODE", hY, cY, 3);
-            for (int r = 9; r <= 11; ++r) {
-                drawCommunityRow(r, cY + (r - 9) * kSettingsRowHeight + offsetY);
+            for (int r = 10; r <= 12; ++r) {
+                drawCommunityRow(r, cY + (r - 10) * kSettingsRowHeight + offsetY);
             }
         } else if (settingsCategory_ == SettingsCategory::About) {
             // Hero branding
@@ -4511,11 +4527,11 @@ private:
                 D2D1::RectF(24, heroTop + 32.0f, width_ - 24, heroTop + 50.0f),
                 hintFormat_.Get(), Muted());
 
-            // Community card (rows 9..11)
+            // Community card (rows 10..12)
             const float cY = 108.0f;
             drawCard(L"COMMUNITY & CODE", 88.0f, cY, 3);
-            for (int r = 9; r <= 11; ++r) {
-                drawCommunityRow(r, cY + (r - 9) * kSettingsRowHeight + offsetY);
+            for (int r = 10; r <= 12; ++r) {
+                drawCommunityRow(r, cY + (r - 10) * kSettingsRowHeight + offsetY);
             }
         }
 

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Pinyin Search for Chinese Programs**: Pinyin search support for applications with Chinese names, allowing users to search using initials (简拼, e.g. `wx` for 微信, `jsq` for 计算器, `sz` for 设置, `wyyyy` for 网易云音乐), full Pinyin (全拼, e.g. `weixin`, `jisuanqi`, `wangyiyunyinyue`), polyphones (多音字, e.g. 乐, 厦, 重, 行), and mixed Chinese + alphanumeric names (e.g. `qqyy` for QQ音乐, `360aqws` for 360安全卫士).
+- **Pinyin Search Setting**: Added a toggle for "Pinyin search" under the "Search & Features" settings card, allowing users to enable or disable Pinyin search anytime.
+
 ## [1.0.4] - 2026-09-18
 
 ### Added

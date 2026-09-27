@@ -112,10 +112,12 @@ inline int MatchScore(std::wstring_view name, std::wstring_view query) {
     if (query.empty()) return -1;
     if (name == query) return 10000;
 
-    const std::wstring queryCondensed = Condense(query);
-    const std::wstring nameCondensed = Condense(name);
-    if (!queryCondensed.empty() && queryCondensed == nameCondensed) {
-        return 9500;
+    if (query.find(L' ') != std::wstring_view::npos || name.find(L' ') != std::wstring_view::npos) {
+        const std::wstring queryCondensed = Condense(query);
+        const std::wstring nameCondensed = Condense(name);
+        if (!queryCondensed.empty() && queryCondensed == nameCondensed) {
+            return 9500;
+        }
     }
 
     // Check word boundary matches
@@ -192,7 +194,8 @@ inline int ScoreApp(
     std::wstring_view normalizedName,
     const std::vector<std::wstring>& aliases,
     std::wstring_view query,
-    int recencyRank = -1
+    int recencyRank = -1,
+    const std::vector<std::wstring>& pinyinAliases = {}
 ) {
     if (query.empty()) return -1;
 
@@ -200,6 +203,14 @@ inline int ScoreApp(
 
     for (const auto& alias : aliases) {
         const int s = MatchScore(alias, query);
+        if (s >= 0) {
+            const int adjusted = s >= 10000 ? 9500 : (s >= 8000 ? s - 600 : s - 1200);
+            if (adjusted > best) best = adjusted;
+        }
+    }
+
+    for (const auto& pinyin : pinyinAliases) {
+        const int s = MatchScore(pinyin, query);
         if (s >= 0) {
             const int adjusted = s >= 10000 ? 9500 : (s >= 8000 ? s - 600 : s - 1200);
             if (adjusted > best) best = adjusted;
